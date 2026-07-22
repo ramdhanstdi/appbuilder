@@ -11,6 +11,7 @@ Arsitektur:
 - `ask_user` (hanya milik PM) memakai interrupt(): eksekusi berhenti sampai user menjawab.
 """
 
+import contextvars
 import os
 import subprocess
 from typing import Annotated
@@ -37,12 +38,28 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.environ.get("PM_WORKSPACE", os.path.join(_BASE_DIR, "workspace"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
+# Per-session workspace root. A ContextVar (not a parameter) so the value propagates
+# implicitly through async LangGraph tool execution without threading it everywhere.
+# Defaults to the shared WORKSPACE so tools work outside a WebSocket session (e.g. tests).
+_SESSION_ROOT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_SESSION_ROOT", default=WORKSPACE
+)
+
+
+def set_session_workspace(thread_id: str) -> str:
+    """Create WORKSPACE/<thread_id>/ for a session, pin it on the ContextVar, return it."""
+    root = os.path.abspath(os.path.join(WORKSPACE, thread_id))
+    os.makedirs(root, exist_ok=True)
+    _SESSION_ROOT.set(root)
+    return root
+
 
 def _safe_path(path: str) -> str:
-    """Kunci semua operasi file agar tidak bisa keluar dari folder WORKSPACE."""
+    """Kunci semua operasi file agar tidak bisa keluar dari root workspace sesi ini."""
+    root = _SESSION_ROOT.get()
     cleaned = path.lstrip("/\\")
-    full = os.path.abspath(os.path.join(WORKSPACE, cleaned))
-    if not (full == WORKSPACE or full.startswith(WORKSPACE + os.sep)):
+    full = os.path.abspath(os.path.join(root, cleaned))
+    if not (full == root or full.startswith(root + os.sep)):
         raise ValueError(f"Akses ditolak: path '{path}' berada di luar workspace.")
     return full
 
@@ -62,7 +79,7 @@ def write_code_file(file_path: str, content: str) -> str:
             os.makedirs(directory, exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"SUKSES: File tersimpan di {os.path.relpath(full, WORKSPACE)}"
+        return f"SUKSES: File tersimpan di {os.path.relpath(full, _SESSION_ROOT.get())}"
     except Exception as e:
         return f"GAGAL menulis file: {e}"
 
@@ -88,10 +105,11 @@ def list_files(path: str = ".") -> str:
         full = _safe_path(path)
         if not os.path.exists(full):
             return f"Folder '{path}' belum ada. Workspace masih kosong di lokasi itu."
+        session_root = _SESSION_ROOT.get()
         lines = []
         for root, dirs, files in os.walk(full):
             dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "dist", "__pycache__")]
-            rel_root = os.path.relpath(root, WORKSPACE)
+            rel_root = os.path.relpath(root, session_root)
             depth = 0 if rel_root == "." else rel_root.count(os.sep) + 1
             if depth > 4:
                 dirs[:] = []
