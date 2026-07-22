@@ -11,8 +11,10 @@ Arsitektur:
 - `ask_user` (hanya milik PM) memakai interrupt(): eksekusi berhenti sampai user menjawab.
 """
 
+import asyncio
 import contextvars
 import os
+import random
 import subprocess
 from typing import Annotated
 
@@ -338,6 +340,38 @@ def _trim_history(history: list) -> list:
     return history[start:]
 
 
+# Base backoff delay (seconds). Overridable via env and monkeypatchable in tests so the
+# suite stays fast; actual waits are _RETRY_BASE_DELAY * 2**attempt plus jitter.
+_RETRY_BASE_DELAY = float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0"))
+
+
+async def _invoke_with_retry(llm, messages, *, attempts: int = 3, agent_key: str = "pm",
+                             writer=None):
+    """Invoke an LLM, retrying transient failures with exponential backoff + jitter.
+
+    Retries on any exception up to `attempts` times (delays 1s, 2s, 4s * base plus jitter),
+    emitting a `retry` stream event before each wait. Re-raises after the final attempt so
+    the caller can surface a real error rather than silently degrading.
+    """
+    for attempt in range(attempts):
+        try:
+            return await llm.ainvoke(messages)
+        except Exception as e:
+            if attempt == attempts - 1:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, _RETRY_BASE_DELAY)
+            if writer is not None:
+                try:
+                    writer({
+                        "agent": agent_key, "type": "retry",
+                        "content": (f"LLM call failed ({e}); retrying in {delay:.1f}s "
+                                    f"(attempt {attempt + 2}/{attempts})"),
+                    })
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+
+
 async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain: tuple) -> str:
     """Tangani pemanggilan discuss_with oleh seorang spesialis.
 
@@ -398,7 +432,7 @@ async def _run_specialist(
         history = _trim_history(history)
         bucket[agent_key] = history
         messages = [SystemMessage(content=cfg["prompt"])] + history
-        response = await llm.ainvoke(messages)
+        response = await _invoke_with_retry(llm, messages, agent_key=agent_key, writer=writer)
         history.append(response)
 
         text = _text_of(response.content)
@@ -509,7 +543,11 @@ class State(TypedDict):
 
 async def project_manager(state: State):
     messages = [SystemMessage(content=AGENTS["pm"]["prompt"])] + state["messages"]
-    response = await _pm_llm.ainvoke(messages)
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+    response = await _invoke_with_retry(_pm_llm, messages, agent_key="pm", writer=writer)
     return {"messages": [response]}
 
 

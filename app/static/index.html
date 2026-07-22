@@ -253,6 +253,10 @@
         sessionThreadId = msg.thread_id;
         refreshFiles();
         break;
+      case "retry":
+        addActivity(agent, "call", "🔁 " + (msg.content || "mencoba ulang…"));
+        markBusy(agent);
+        break;
       case "working":
         setStatus("working", "Tim sedang bekerja…");
         markBusy("pm");
