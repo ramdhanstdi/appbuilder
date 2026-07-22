@@ -298,6 +298,27 @@ _SPECIALIST_HISTORY: dict[str, dict[str, list]] = {}
 
 MAX_SPECIALIST_STEPS = 40
 
+# Batas jumlah pesan yang disimpan dalam history satu spesialis. History menumpuk lintas
+# assign_task dalam satu sesi; tanpa batas, biaya token tumbuh tanpa henti.
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "60"))
+
+
+def _trim_history(history: list) -> list:
+    """Keep the most recent MAX_HISTORY_MESSAGES messages without orphaning tool plumbing.
+
+    A ToolMessage must stay attached to the AIMessage.tool_calls that produced it. If the
+    cut lands on an orphaned ToolMessage (its AIMessage was dropped), advance the boundary
+    past those leading ToolMessages so the window starts on a clean pair boundary. The
+    result therefore never begins with a ToolMessage and never contains an AIMessage whose
+    tool_calls lost their replies.
+    """
+    if len(history) <= MAX_HISTORY_MESSAGES:
+        return history
+    start = len(history) - MAX_HISTORY_MESSAGES
+    while start < len(history) and isinstance(history[start], ToolMessage):
+        start += 1
+    return history[start:]
+
 
 async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain: tuple) -> str:
     """Tangani pemanggilan discuss_with oleh seorang spesialis.
@@ -341,7 +362,8 @@ async def _run_specialist(
         llm = _SPECIALIST_LLMS[agent_key]
     writer = get_stream_writer()
 
-    history = _SPECIALIST_HISTORY.setdefault(thread_id, {}).setdefault(agent_key, [])
+    bucket = _SPECIALIST_HISTORY.setdefault(thread_id, {})
+    history = bucket.setdefault(agent_key, [])
     if source == "pm":
         history.append(HumanMessage(content=f"📥 Tugas dari Project Manager:\n{content}"))
         writer({"agent": agent_key, "type": "task", "content": content})
@@ -353,6 +375,10 @@ async def _run_specialist(
         writer({"agent": agent_key, "type": "peer_in", "from": source, "content": content})
 
     for _ in range(MAX_SPECIALIST_STEPS):
+        # Bound token growth: trim before each turn, keeping the shared bucket in sync so
+        # later appends land on the same (trimmed) list.
+        history = _trim_history(history)
+        bucket[agent_key] = history
         messages = [SystemMessage(content=cfg["prompt"])] + history
         response = await llm.ainvoke(messages)
         history.append(response)
