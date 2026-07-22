@@ -109,24 +109,53 @@ def list_files(path: str = ".") -> str:
 
 
 @tool
-def run_command(command: str, working_dir: str = ".") -> str:
-    """Menjalankan perintah shell di dalam workspace, misal 'npm install' atau 'npm run build'.
-    working_dir relatif terhadap workspace. Timeout 5 menit.
-    JANGAN gunakan untuk perintah yang berjalan selamanya (npm run dev / server).
+def run_command(command: str, working_dir: str = ".", timeout_seconds: int = 120) -> str:
+    """Menjalankan perintah shell di dalam workspace, misal 'npm install', 'npm run build',
+    'node --check', atau smoke test. working_dir relatif terhadap workspace.
+    timeout_seconds default 120, maksimal 300 (pakai nilai besar hanya untuk install/build lama).
+
+    GARANSI SISTEM: seluruh process group DIBUNUH PAKSA saat timeout ATAU saat perintah
+    selesai — proses background tidak pernah bocor. Untuk smoke test server, jalankan
+    server di background dengan output di-redirect ke file, tunggu, lalu curl — semua
+    dalam SATU perintah. Contoh:
+    'node backend/server.js > smoke.log 2>&1 & sleep 2; curl -s http://localhost:3000/api/health'
     """
+    import signal
     try:
         cwd = _safe_path(working_dir)
-        result = subprocess.run(
+        timeout_seconds = max(5, min(int(timeout_seconds), 300))
+        # start_new_session=True: perintah + semua anaknya masuk satu process group
+        # baru, sehingga bisa dibunuh serentak (termasuk server yang di-background).
+        proc = subprocess.Popen(
             command, shell=True, cwd=cwd,
-            capture_output=True, text=True, timeout=300,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
         )
-        out = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+        timed_out = False
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            stdout, stderr = proc.communicate()
+        finally:
+            # Sapu bersih sisa proses background walau perintah utama selesai normal.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        out = (stdout or "") + ("\n" + stderr if stderr else "")
         if len(out) > 6000:
             out = out[:3000] + "\n... [terpotong] ...\n" + out[-3000:]
-        status = "SUKSES" if result.returncode == 0 else f"GAGAL (exit code {result.returncode})"
+        if timed_out:
+            return (f"GAGAL: perintah melebihi batas {timeout_seconds} detik dan seluruh "
+                    f"prosesnya dihentikan paksa.\nOutput sejauh ini:\n{out.strip()}")
+        status = "SUKSES" if proc.returncode == 0 else f"GAGAL (exit code {proc.returncode})"
         return f"{status}\n{out.strip()}"
-    except subprocess.TimeoutExpired:
-        return "GAGAL: Perintah melebihi batas waktu 5 menit."
     except Exception as e:
         return f"GAGAL menjalankan perintah: {e}"
 
@@ -155,6 +184,45 @@ BASE_TOOLS = {
 # Berapa lapis diskusi beruntun yang diizinkan (tugas PM = kedalaman 0).
 # Mencegah dua agent saling memanggil tanpa henti.
 MAX_DISCUSSION_DEPTH = 2
+
+# Batas jumlah assign_task per satu permintaan user (di-reset tiap pesan user baru).
+MAX_ASSIGN_TASKS_PER_REQUEST = int(os.environ.get("MAX_ASSIGN_TASKS", "12"))
+_ASSIGN_BUDGET: dict[str, int] = {}
+
+
+def reset_task_budget(thread_id: str) -> None:
+    _ASSIGN_BUDGET[thread_id] = 0
+
+
+# Zona kepemilikan file per agent, dicek DI LEVEL TOOL (bukan sekadar prompt).
+# Path pertama = folder app; sisanya dicocokkan ke zona ini.
+# Agent yang tidak terdaftar di sini (misal 'qa') sama sekali tidak boleh menulis.
+_WRITE_ZONES: dict[str, tuple[str, ...]] = {
+    "ba": ("docs/",),
+    "frontend": ("frontend/", "README.md", ".env.example"),
+    "backend": ("backend/", "docs/API_CONTRACT.md", "README.md", ".env.example"),
+}
+
+
+def _zone_error(agent_key: str, file_path: str) -> str | None:
+    """None jika boleh menulis; pesan GAGAL jika path di luar zona agent."""
+    zones = _WRITE_ZONES.get(agent_key)
+    if zones is None:
+        return (f"GAGAL: {AGENTS[agent_key]['name']} adalah reviewer murni dan tidak "
+                f"boleh menulis file. Minta engineer pemilik kodenya lewat discuss_with.")
+    parts = [p for p in file_path.replace("\\", "/").strip("/").split("/") if p]
+    if len(parts) < 2:
+        return ("GAGAL: file harus berada di dalam folder app "
+                "(contoh 'my-app/frontend/index.html'), bukan langsung di root workspace.")
+    inner = "/".join(parts[1:])
+    for zone in zones:
+        if zone.endswith("/") and inner.startswith(zone):
+            return None
+        if inner == zone:
+            return None
+    allowed = ", ".join(f"<app>/{z}" for z in zones)
+    return (f"GAGAL: path '{file_path}' di luar zona kepemilikanmu ({allowed}). "
+            f"Minta owner path tersebut mengubahnya lewat discuss_with.")
 
 
 def summarize_args(name: str, args: dict) -> str:
@@ -225,32 +293,43 @@ _SPECIALIST_HISTORY: dict[str, dict[str, list]] = {}
 MAX_SPECIALIST_STEPS = 40
 
 
-async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, depth: int) -> str:
-    """Tangani pemanggilan discuss_with oleh seorang spesialis."""
+async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain: tuple) -> str:
+    """Tangani pemanggilan discuss_with oleh seorang spesialis.
+
+    chain = rantai agent yang sedang aktif di tumpukan pemanggilan (tidak termasuk
+    sender). Dipakai untuk menolak siklus: A -> B -> A.
+    """
     target = (tc_args.get("agent") or "").strip().lower()
     message = tc_args.get("message") or ""
     if target not in SPECIALISTS:
         return f"GAGAL: agent '{target}' tidak dikenal. Pilihan: {', '.join(SPECIALISTS)}."
     if target == sender_key:
         return "GAGAL: kamu tidak bisa berdiskusi dengan dirimu sendiri."
-    if depth + 1 > MAX_DISCUSSION_DEPTH:
-        return "GAGAL: batas kedalaman diskusi tercapai. Selesaikan tugasmu dan sampaikan sisanya di laporan ke PM."
-    reply = await _run_specialist(target, message, thread_id, source=sender_key, depth=depth + 1)
+    if target in chain:
+        return (f"GAGAL: {AGENTS[target]['name']} adalah pemanggilmu dalam rantai diskusi "
+                f"ini — jawab langsung di balasanmu, jangan memulai diskusi balik.")
+    if len(chain) + 1 >= MAX_DISCUSSION_DEPTH:
+        return ("GAGAL: batas kedalaman diskusi tercapai. Selesaikan tugasmu dan "
+                "sampaikan sisanya di laporan ke PM.")
+    reply = await _run_specialist(
+        target, message, thread_id, source=sender_key, chain=chain + (sender_key,)
+    )
     return f"💬 Balasan dari {AGENTS[target]['name']}:\n{reply}"
 
 
 async def _run_specialist(
-    agent_key: str, content: str, thread_id: str, *, source: str = "pm", depth: int = 0
+    agent_key: str, content: str, thread_id: str, *, source: str = "pm", chain: tuple = ()
 ) -> str:
     """Jalankan loop kerja satu agent spesialis sampai ia memberikan jawaban akhir.
 
     source="pm"  : tugas resmi dari Project Manager (assign_task).
     source=<key> : pesan diskusi dari spesialis lain (discuss_with).
+    chain        : agent-agent yang menunggu di tumpukan pemanggilan (untuk guard siklus).
     """
     cfg = AGENTS[agent_key]
-    # Saat kedalaman diskusi maksimal, agent penerima tidak diberi tool discuss_with
+    # Di kedalaman maksimal, agent penerima tidak diberi tool discuss_with
     # sehingga rantai diskusi pasti berhenti.
-    if depth >= MAX_DISCUSSION_DEPTH:
+    if len(chain) >= MAX_DISCUSSION_DEPTH:
         llm = _SPECIALIST_LLMS_NO_DISCUSS[agent_key]
     else:
         llm = _SPECIALIST_LLMS[agent_key]
@@ -288,7 +367,7 @@ async def _run_specialist(
             })
 
             if tc["name"] == "discuss_with":
-                result = await _run_discussion(agent_key, tc.get("args") or {}, thread_id, depth)
+                result = await _run_discussion(agent_key, tc.get("args") or {}, thread_id, chain)
                 ok = not result.startswith("GAGAL")
                 history.append(ToolMessage(content=result[:8000], tool_call_id=tc["id"], name=tc["name"]))
                 # Untuk UI, buang baris prefix "Balasan dari ..." karena label bubble
@@ -304,8 +383,15 @@ async def _run_specialist(
                 })
                 continue
 
+            # Validasi zona kepemilikan path DI LEVEL TOOL (aturan prompt saja bisa bocor).
+            zone_err = None
+            if tc["name"] == "write_code_file":
+                zone_err = _zone_error(agent_key, (tc.get("args") or {}).get("file_path", ""))
+
             tool_fn = BASE_TOOLS.get(tc["name"])
-            if tool_fn is None:
+            if zone_err is not None:
+                result = zone_err
+            elif tool_fn is None:
                 result = f"GAGAL: tool '{tc['name']}' tidak tersedia untukmu."
             else:
                 try:
@@ -337,6 +423,14 @@ async def assign_task(agent: str, task: str, config: RunnableConfig) -> str:
     if agent not in SPECIALISTS:
         return f"GAGAL: agent '{agent}' tidak dikenal. Pilihan: {', '.join(SPECIALISTS)}."
     thread_id = (config.get("configurable") or {}).get("thread_id", "default")
+
+    used = _ASSIGN_BUDGET.get(thread_id, 0) + 1
+    _ASSIGN_BUDGET[thread_id] = used
+    if used > MAX_ASSIGN_TASKS_PER_REQUEST:
+        return (f"GAGAL: batas {MAX_ASSIGN_TASKS_PER_REQUEST} delegasi untuk permintaan "
+                f"ini sudah habis. HENTIKAN delegasi — rangkum status pekerjaan apa adanya "
+                f"ke user (sebutkan apa yang selesai dan apa yang belum).")
+
     report = await _run_specialist(agent, task, thread_id)
     return f"📤 Laporan dari {AGENTS[agent]['name']}:\n{report}"
 

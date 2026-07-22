@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
-from app.agent import WORKSPACE, _text_of, build_graph, summarize_args
+from app.agent import WORKSPACE, _text_of, build_graph, reset_task_budget, summarize_args
 from app.config import AGENTS
 
 app = FastAPI(title="App Builder — Tim Multi-Agent")
@@ -87,6 +87,8 @@ async def ws_endpoint(ws: WebSocket):
                 waiting_for_answer = False
             else:
                 graph_input = {"messages": [HumanMessage(content=text)]}
+                # Permintaan baru dari user = jatah delegasi PM di-reset.
+                reset_task_budget(thread_id)
 
             await ws.send_json({"type": "working"})
 
