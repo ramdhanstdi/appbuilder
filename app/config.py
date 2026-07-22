@@ -15,12 +15,27 @@ Environment variable per agent tetap bisa dipakai untuk override tanpa mengubah 
 
 import os
 
+from dotenv import load_dotenv
+
+# Load variables from a local .env before reading any configuration. This keeps
+# credentials out of the source tree — see .env.example for the full list.
+load_dotenv()
+
 
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+# Shared fallbacks. Every agent inherits these unless a per-agent <PREFIX>_* override
+# is set. AGENTS_API_KEY and AGENTS_MODEL have no built-in default and must be provided
+# through the environment (directly or per agent).
+AGENTS_API_BASE = os.environ.get("AGENTS_API_BASE", "http://localhost:20128/v1")
+AGENTS_API_KEY = os.environ.get("AGENTS_API_KEY", "")
+AGENTS_MODEL = os.environ.get("AGENTS_MODEL", "")
+AGENTS_TEMPERATURE = _env_float("AGENTS_TEMPERATURE", 0.1)
 
 
 _GENERAL_RULES = """
@@ -145,67 +160,60 @@ Cara kerja:
 {_GENERAL_RULES}"""
 
 
-def _agent(prefix: str, name: str, emoji: str, prompt: str, tools: list[str], *,
-           api_base: str, api_key: str, model: str, temperature: float = 0.1) -> dict:
+def _agent(prefix: str, name: str, emoji: str, prompt: str, tools: list[str]) -> dict:
+    """Build one agent config. Values default to the shared AGENTS_* fallbacks and are
+    individually overridable via <PREFIX>_API_BASE / _API_KEY / _MODEL / _TEMPERATURE."""
     return {
         "key": prefix.lower(),
         "name": name,
         "emoji": emoji,
         "prompt": prompt,
         "tools": tools,
-        "api_base": os.environ.get(f"{prefix}_API_BASE", api_base),
-        "api_key": os.environ.get(f"{prefix}_API_KEY", api_key),
-        "model": os.environ.get(f"{prefix}_MODEL", model),
-        "temperature": _env_float(f"{prefix}_TEMPERATURE", temperature),
+        "api_base": os.environ.get(f"{prefix}_API_BASE", AGENTS_API_BASE),
+        "api_key": os.environ.get(f"{prefix}_API_KEY", AGENTS_API_KEY),
+        "model": os.environ.get(f"{prefix}_MODEL", AGENTS_MODEL),
+        "temperature": _env_float(f"{prefix}_TEMPERATURE", AGENTS_TEMPERATURE),
     }
 
 
 # ==========================================================================
-# EDIT DI SINI: konfigurasi model TERPISAH untuk masing-masing agent.
-# Tiap agent bebas pakai provider (api_base + api_key) dan model berbeda.
+# Konfigurasi model TERPISAH untuk masing-masing agent. Semua kredensial diambil
+# dari environment (lihat .env.example). Tiap agent bebas pakai provider (api_base +
+# api_key) dan model berbeda lewat override <PREFIX>_* tanpa mengubah file ini.
 # ==========================================================================
 AGENTS = {
     "pm": _agent(
         "PM", "Project Manager", "🧑‍💼", PM_PROMPT,
         ["assign_task", "ask_user", "list_files", "read_code_file"],
-        api_base="http://localhost:20128/v1",
-        api_key="sk-199156432860867f-1xcg14-e4f1dc4e",
-        model="cc/claude-sonnet-5(high)",
-        temperature=0.1,
     ),
     "ba": _agent(
         "BA", "Business Analyst", "📊", BA_PROMPT,
         ["write_code_file", "read_code_file", "list_files", "discuss_with"],
-        api_base="http://localhost:20128/v1",
-        api_key="sk-199156432860867f-1xcg14-e4f1dc4e",
-        model="cc/claude-sonnet-5(high)",
-        temperature=0.1,
     ),
     "frontend": _agent(
         "FRONTEND", "Frontend Engineer", "🎨", FRONTEND_PROMPT,
         ["write_code_file", "read_code_file", "list_files", "run_command", "discuss_with"],
-        api_base="http://localhost:20128/v1",
-        api_key="sk-199156432860867f-1xcg14-e4f1dc4e",
-        model="cc/claude-sonnet-5(high)",
-        temperature=0.1,
     ),
     "backend": _agent(
         "BACKEND", "Backend Engineer", "⚙️", BACKEND_PROMPT,
         ["write_code_file", "read_code_file", "list_files", "run_command", "discuss_with"],
-        api_base="http://localhost:20128/v1",
-        api_key="sk-199156432860867f-1xcg14-e4f1dc4e",
-        model="cc/claude-sonnet-5(high)",
-        temperature=0.1,
     ),
     "qa": _agent(
         "QA", "Quality Assurance", "🔍", QA_PROMPT,
         ["read_code_file", "list_files", "run_command", "discuss_with"],
-        api_base="http://localhost:20128/v1",
-        api_key="sk-199156432860867f-1xcg14-e4f1dc4e",
-        model="cc/claude-sonnet-5(high)",
-        temperature=0.1,
     ),
 }
+
+# Fail loudly at import time, not at first request: an agent with no resolvable API key
+# cannot work, so refuse to start and name the variable that would fix it.
+_missing_keys = [key for key, cfg in AGENTS.items() if not (cfg["api_key"] or "").strip()]
+if _missing_keys:
+    _names = ", ".join(f"{key.upper()}_API_KEY" for key in _missing_keys)
+    raise RuntimeError(
+        "Missing API key for agent(s): "
+        f"{', '.join(_missing_keys)}. Set AGENTS_API_KEY for all agents, or a per-agent "
+        f"override ({_names}). See .env.example."
+    )
 
 # Daftar spesialis diturunkan dari AGENTS — menambah agent baru cukup di dict di atas.
 SPECIALISTS = tuple(k for k in AGENTS if k != "pm")
