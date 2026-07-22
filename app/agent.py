@@ -194,6 +194,12 @@ def reset_task_budget(thread_id: str) -> None:
     _ASSIGN_BUDGET[thread_id] = 0
 
 
+def cleanup_session(thread_id: str) -> None:
+    """Release all in-process state held for a finished session."""
+    _SPECIALIST_HISTORY.pop(thread_id, None)
+    _ASSIGN_BUDGET.pop(thread_id, None)
+
+
 # Zona kepemilikan file per agent, dicek DI LEVEL TOOL (bukan sekadar prompt).
 # Path pertama = folder app; sisanya dicocokkan ke zona ini.
 # Agent yang tidak terdaftar di sini (misal 'qa') sama sekali tidak boleh menulis.

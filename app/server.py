@@ -21,7 +21,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
-from app.agent import WORKSPACE, _text_of, build_graph, reset_task_budget, summarize_args
+from app.agent import (
+    WORKSPACE,
+    _text_of,
+    build_graph,
+    cleanup_session,
+    reset_task_budget,
+    set_session_workspace,
+    summarize_args,
+)
 from app.config import AGENTS
 
 app = FastAPI(title="App Builder — Tim Multi-Agent")
@@ -145,6 +153,9 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "done"})
     except WebSocketDisconnect:
         pass
+    finally:
+        # Release per-session in-process state on both normal disconnect and exception.
+        cleanup_session(thread_id)
 
 
 if __name__ == "__main__":
