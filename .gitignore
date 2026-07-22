@@ -1,0 +1,30 @@
+# Python virtual environment (this repo root is itself a venv)
+bin/
+include/
+lib/
+lib64
+pyvenv.cfg
+share/
+pip-selfcheck.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+bin
+
+# Environment / secrets
+.env
+.env.*
+
+# Node (workspace subprojects)
+node_modules/
+dist/
+
+# Editor/OS
+.vscode/
+.DS_Store
+
+# Project-specific
+workspace/

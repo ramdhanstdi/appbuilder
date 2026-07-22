@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>App Builder — Tim Multi-Agent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0f1117; --panel: #161a23; --panel2: #1c2130; --border: #2a3040;
+    --text: #e6e9f0; --muted: #8b93a7; --accent: #6c8cff; --green: #4ade80;
+    --red: #f87171; --amber: #fbbf24;
+    --c-pm: #6c8cff; --c-ba: #c084fc; --c-frontend: #f472b6; --c-backend: #fb923c; --c-qa: #4ade80;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; background: var(--panel);
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  #status {
+    font-size: 12px; color: var(--muted); margin-left: auto;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #status::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); display: inline-block; flex-shrink: 0;
+  }
+  #status.online::before { background: var(--green); }
+  #status.working::before { background: var(--amber); animation: pulse 1s infinite; }
+  #status.question::before { background: var(--accent); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #chat-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  #tabs { display: flex; gap: 4px; padding: 8px 12px 0; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .tab {
+    padding: 8px 14px; font-size: 13px; cursor: pointer; border-radius: 8px 8px 0 0;
+    color: var(--muted); border: 1px solid transparent; border-bottom: none;
+    display: flex; align-items: center; gap: 6px; white-space: nowrap; position: relative;
+    background: transparent; user-select: none;
+  }
+  .tab.active { background: var(--bg); border-color: var(--border); color: var(--text); }
+  .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tabcolor, var(--muted)); }
+  .tab .badge {
+    min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; background: var(--red);
+    color: #fff; font-size: 10px; font-weight: 700; display: none;
+    align-items: center; justify-content: center;
+  }
+  .tab.unread .badge { display: inline-flex; }
+  .tab.busy .dot { animation: pulse 0.8s infinite; }
+
+  .pane { flex: 1; overflow-y: auto; padding: 18px; display: none; flex-direction: column; gap: 10px; }
+  .pane.active { display: flex; }
+
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.agent { align-self: flex-start; background: var(--panel2); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg.task { align-self: flex-start; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.4); }
+  .msg.report { align-self: flex-start; background: rgba(74,222,128,0.07); border: 1px solid rgba(74,222,128,0.35); }
+  .msg.question { align-self: flex-start; background: rgba(108,140,255,0.12); border: 1px solid var(--accent); }
+  .msg.error { align-self: flex-start; background: rgba(248,113,113,0.1); border: 1px solid var(--red); color: var(--red); }
+  .msg.peer-in { align-self: flex-start; background: rgba(192,132,252,0.09); border: 1px solid rgba(192,132,252,0.45); }
+  .msg.peer-reply { align-self: flex-start; background: rgba(244,114,182,0.08); border: 1px solid rgba(244,114,182,0.4); }
+  .msg.peer-in .label, .msg.peer-reply .label { color: #c084fc; }
+  .msg .label { display: block; font-size: 10px; font-weight: 700; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+  .msg.question .label { color: var(--accent); }
+  .msg.task .label { color: var(--amber); }
+  .msg.report .label { color: var(--green); }
+
+  .activity {
+    align-self: flex-start; font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 12px; color: var(--muted); padding: 3px 10px;
+    border-left: 2px solid var(--border); max-width: 90%; overflow-wrap: break-word;
+  }
+  .activity.ok { border-left-color: var(--green); }
+  .activity.fail { border-left-color: var(--red); color: var(--red); }
+  .activity.call { border-left-color: var(--amber); }
+
+  #input-bar { display: flex; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--panel); align-items: flex-end; }
+  #input-hint { font-size: 11px; color: var(--muted); padding: 0 18px 10px; background: var(--panel); }
+  #input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 11px 14px; font-size: 14px; outline: none; resize: none;
+    font-family: inherit; max-height: 140px;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px;
+    padding: 11px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #files-col { width: 280px; border-left: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; }
+  #files-col h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); padding: 14px 16px 8px; }
+  #file-tree { flex: 1; overflow-y: auto; padding: 0 16px 16px; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; line-height: 1.9; }
+  .ft-dir { color: var(--accent); }
+  .ft-file { color: var(--text); }
+  .ft-empty { color: var(--muted); font-style: italic; }
+  @media (max-width: 900px) { #files-col { display: none; } }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🤖 App Builder — Tim Multi-Agent</h1>
+    <span id="status">menghubungkan…</span>
+  </header>
+  <main>
+    <div id="chat-col">
+      <div id="tabs"></div>
+      <div id="panes" style="flex:1; display:flex; flex-direction:column; min-height:0;"></div>
+      <div id="input-bar">
+        <textarea id="input" rows="1" placeholder="Beri perintah ke Project Manager…"></textarea>
+        <button id="send">Kirim</button>
+      </div>
+      <div id="input-hint">Kamu hanya berbicara dengan PM — dia yang mengatur seluruh tim. Tab lain untuk memantau kerja tiap agent.</div>
+    </div>
+    <div id="files-col">
+      <h2>📁 Workspace</h2>
+      <div id="file-tree"><div class="ft-empty">Belum ada file.</div></div>
+    </div>
+  </main>
+
+<script>
+  const tabsEl = document.getElementById("tabs");
+  const panesEl = document.getElementById("panes");
+  const inputEl = document.getElementById("input");
+  const sendEl = document.getElementById("send");
+  const statusEl = document.getElementById("status");
+  const treeEl = document.getElementById("file-tree");
+
+  let ws = null;
+  let busy = false;
+  let agentsInfo = {};   // key -> {name, emoji}
+  let activeTab = "pm";
+
+  function setStatus(cls, text) { statusEl.className = cls; statusEl.textContent = text; }
+
+  function setBusy(b) {
+    busy = b;
+    sendEl.disabled = b;
+    inputEl.disabled = b;
+    if (!b) inputEl.focus();
+  }
+
+  function buildTabs(agents) {
+    tabsEl.innerHTML = ""; panesEl.innerHTML = "";
+    for (const a of agents) {
+      agentsInfo[a.key] = a;
+      const tab = document.createElement("div");
+      tab.className = "tab" + (a.key === activeTab ? " active" : "");
+      tab.id = "tab-" + a.key;
+      tab.style.setProperty("--tabcolor", `var(--c-${a.key})`);
+      tab.innerHTML = `<span class="dot"></span>${a.emoji} ${a.name}<span class="badge">0</span>`;
+      tab.onclick = () => switchTab(a.key);
+      tabsEl.appendChild(tab);
+
+      const pane = document.createElement("div");
+      pane.className = "pane" + (a.key === activeTab ? " active" : "");
+      pane.id = "pane-" + a.key;
+      panesEl.appendChild(pane);
+    }
+  }
+
+  function switchTab(key) {
+    activeTab = key;
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.id === "tab-" + key));
+    document.querySelectorAll(".pane").forEach(p => p.classList.toggle("active", p.id === "pane-" + key));
+    const tab = document.getElementById("tab-" + key);
+    tab.classList.remove("unread");
+    tab.querySelector(".badge").textContent = "0";
+    const pane = document.getElementById("pane-" + key);
+    pane.scrollTop = pane.scrollHeight;
+  }
+
+  function notify(agentKey) {
+    if (agentKey === activeTab) return;
+    const tab = document.getElementById("tab-" + agentKey);
+    if (!tab) return;
+    const badge = tab.querySelector(".badge");
+    badge.textContent = Math.min(99, (parseInt(badge.textContent) || 0) + 1);
+    tab.classList.add("unread");
+  }
+
+  function markBusy(agentKey) {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("busy"));
+    if (agentKey) {
+      const tab = document.getElementById("tab-" + agentKey);
+      if (tab) tab.classList.add("busy");
+      const info = agentsInfo[agentKey];
+      if (info) setStatus("working", `${info.name} sedang bekerja…`);
+    }
+  }
+
+  function paneOf(agentKey) {
+    return document.getElementById("pane-" + agentKey) || document.getElementById("pane-pm");
+  }
+
+  function addMsg(agentKey, cls, text, label) {
+    const pane = paneOf(agentKey);
+    const div = document.createElement("div");
+    div.className = "msg " + cls;
+    if (label) {
+      const l = document.createElement("span");
+      l.className = "label"; l.textContent = label;
+      div.appendChild(l);
+    }
+    div.appendChild(document.createTextNode(text));
+    pane.appendChild(div);
+    pane.scrollTop = pane.scrollHeight;
+    notify(agentKey);
+  }
+
+  function addActivity(agentKey, cls, text) {
+    const pane = paneOf(agentKey);
+    const div = document.createElement("div");
+    div.className = "activity " + cls;
+    div.textContent = text;
+    pane.appendChild(div);
+    pane.scrollTop = pane.scrollHeight;
+    notify(agentKey);
+  }
+
+  async function refreshFiles() {
+    try {
+      const res = await fetch("/api/files");
+      const items = await res.json();
+      if (!items.length) { treeEl.innerHTML = '<div class="ft-empty">Belum ada file.</div>'; return; }
+      treeEl.innerHTML = "";
+      for (const it of items) {
+        const div = document.createElement("div");
+        div.className = it.type === "dir" ? "ft-dir" : "ft-file";
+        div.style.paddingLeft = (it.depth * 14) + "px";
+        div.textContent = (it.type === "dir" ? "📂 " : "📄 ") + it.path.split("/").pop();
+        treeEl.appendChild(div);
+      }
+    } catch (e) { /* abaikan */ }
+  }
+
+  function handleEvent(msg) {
+    const agent = msg.agent || "pm";
+    switch (msg.type) {
+      case "working":
+        setStatus("working", "Tim sedang bekerja…");
+        markBusy("pm");
+        break;
+      case "msg":
+        addMsg(agent, "agent", msg.content);
+        markBusy(agent);
+        break;
+      case "task":
+        addMsg(agent, "task", msg.content, "📥 Tugas dari PM");
+        markBusy(agent);
+        break;
+      case "peer_in": {
+        const from = agentsInfo[msg.from] || { name: msg.from, emoji: "💬" };
+        addMsg(agent, "peer-in", msg.content, `💬 Pesan dari ${from.emoji} ${from.name}`);
+        markBusy(agent);
+        break;
+      }
+      case "peer_reply": {
+        const from = agentsInfo[msg.from] || { name: msg.from, emoji: "💬" };
+        addMsg(agent, "peer-reply", msg.content, `💬 Balasan dari ${from.emoji} ${from.name}`);
+        markBusy(agent);
+        break;
+      }
+      case "report":
+        addMsg("pm", "report", msg.content, "📤 Laporan spesialis");
+        markBusy("pm");
+        refreshFiles();
+        break;
+      case "question":
+        addMsg("pm", "question", msg.content, "PM bertanya — jawab di bawah");
+        setStatus("question", "menunggu jawabanmu");
+        markBusy(null);
+        setBusy(false);
+        switchTab("pm");
+        refreshFiles();
+        break;
+      case "tool_call":
+        addActivity(agent, "call", "⚙️ " + (msg.detail || msg.name));
+        markBusy(agent);
+        break;
+      case "tool_result":
+        addActivity(agent, msg.ok ? "ok" : "fail",
+          (msg.ok ? "✓ " : "✗ ") + msg.name + ": " + (msg.content || "").split("\n")[0]);
+        refreshFiles();
+        break;
+      case "error":
+        addMsg("pm", "error", msg.content);
+        break;
+      case "done":
+        setStatus("online", "siap");
+        markBusy(null);
+        setBusy(false);
+        refreshFiles();
+        break;
+    }
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws");
+    ws.onopen = () => { setStatus("online", "siap"); setBusy(false); };
+    ws.onclose = () => {
+      setStatus("", "terputus — menyambung ulang…");
+      setBusy(true);
+      setTimeout(connect, 2000);
+    };
+    ws.onmessage = (ev) => handleEvent(JSON.parse(ev.data));
+  }
+
+  function send() {
+    const text = inputEl.value.trim();
+    if (!text || busy || !ws || ws.readyState !== WebSocket.OPEN) return;
+    addMsg("pm", "user", text);
+    switchTab("pm");
+    ws.send(JSON.stringify({ content: text }));
+    inputEl.value = "";
+    inputEl.style.height = "auto";
+    setBusy(true);
+  }
+
+  sendEl.addEventListener("click", send);
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  inputEl.addEventListener("input", () => {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px";
+  });
+
+  (async () => {
+    const res = await fetch("/api/agents");
+    buildTabs(await res.json());
+    connect();
+    refreshFiles();
+  })();
+</script>
+</body>
+</html>
