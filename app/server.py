@@ -31,6 +31,7 @@ from app.agent import (
     summarize_args,
 )
 from app.config import AGENTS
+from app.language import resolve_session_language, start_session
 from app.protocol import is_failure
 
 app = FastAPI(title="App Builder — Tim Multi-Agent")
@@ -101,11 +102,14 @@ async def ws_endpoint(ws: WebSocket):
     thread_id = str(uuid.uuid4())
     # Isolate this session's generated files under WORKSPACE/<thread_id>/.
     set_session_workspace(thread_id)
+    # Each handler runs in its own task, so this ContextVar write is session-local.
+    language = start_session(thread_id)
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 200}
     waiting_for_answer = False
 
     # Let the client scope its file-tree requests to this session.
     await ws.send_json({"type": "session", "thread_id": thread_id})
+    await ws.send_json({"type": "language", "code": language})
 
     try:
         while True:
@@ -113,6 +117,13 @@ async def ws_endpoint(ws: WebSocket):
             text = (data.get("content") or "").strip()
             if not text:
                 continue
+
+            # Response language follows the language the user actually writes in, and is
+            # sticky: a short ambiguous follow-up never flips it.
+            resolved = resolve_session_language(text, thread_id)
+            if resolved != language:
+                language = resolved
+                await ws.send_json({"type": "language", "code": language})
 
             if waiting_for_answer:
                 graph_input = Command(resume=text)
@@ -168,10 +179,9 @@ async def ws_endpoint(ws: WebSocket):
                                 "content": result[:1500],
                             })
             except Exception as e:
-                await ws.send_json({
-                    "agent": "pm", "type": "error",
-                    "content": f"Terjadi masalah saat eksekusi: {e}",
-                })
+                # The message itself is technical detail; the client prefixes it with a
+                # localized label rather than receiving prose in a fixed language.
+                await ws.send_json({"agent": "pm", "type": "error", "content": str(e)})
 
             if not waiting_for_answer:
                 await ws.send_json({"type": "done"})

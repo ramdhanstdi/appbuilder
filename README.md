@@ -101,7 +101,7 @@ dangerous, so peer communication is bounded on three axes: depth, cycles, and to
 
 | Agent | Role | Write access | Tools |
 |---|---|---|---|
-| 🧑‍💼 `pm` | Project Manager — the only agent the user talks to. Writes no code. | none | `assign_task`, `ask_user`, `list_files`, `read_code_file` |
+| 🧑‍💼 `pm` | Project Manager — the only agent the user talks to. Writes no code. | none | `assign_task`, `ask_user`, `list_files`, `read_code_file`, `set_response_language` |
 | 📊 `ba` | Business Analyst / Tech Lead — owns the spec, the stack, and the API contract. | `<app>/docs/**` | `write_code_file`, `read_code_file`, `list_files`, `discuss_with` |
 | 🎨 `frontend` | Frontend Engineer — builds the UI against the contract. | `<app>/frontend/**`, `README.md`, `.env.example` | + `run_command` |
 | ⚙️ `backend` | Backend Engineer — owns `API_CONTRACT.md`; the only agent allowed to change it. | `<app>/backend/**`, `docs/API_CONTRACT.md`, `README.md`, `.env.example` | + `run_command` |
@@ -200,7 +200,32 @@ The server consumes two stream modes at once:
 Without the custom channel, everything a specialist does would be invisible until its
 final report. With it, each agent gets its own live tab in the browser.
 
-### 7. Filesystem sandbox
+### 7. The response language follows the user; the protocol does not
+
+The system speaks the language the user writes in — chat replies, specialist reports, and
+the contents of `SPEC.md`, `API_CONTRACT.md`, and the generated `README.md`. Detection is
+deterministic (`langdetect` with a fixed seed) and **sticky**: it changes only on another
+confident detection, so a short follow-up like `ok`, `lanjut`, or `next` can never flip a
+session's language mid-build.
+
+Three things stay English no matter what:
+
+| Category | Language |
+|---|---|
+| Chat replies, reports, generated document contents | Session language |
+| Code — identifiers, function names, comments, log strings | Always English |
+| Protocol tokens (`STATUS:`, `OK:`, `FAILED:`) and **all file and folder names** | Always English |
+
+The file-name rule is load-bearing rather than stylistic: `_WRITE_ZONES` matches literal
+path prefixes like `docs/` and `docs/API_CONTRACT.md`. A translated filename would fail
+the ownership check and the agent could not write its own spec.
+
+The language is injected per invocation — `cfg["prompt"] + language_directive(...)` — and
+never written back into the shared `AGENTS` dict, so two concurrent sessions in different
+languages cannot leak into each other. `set_response_language` lets the user pin a
+language explicitly, which then outranks detection for the rest of the session.
+
+### 8. Filesystem sandbox
 
 `_safe_path()` normalizes and jails every file operation to `WORKSPACE`, rejecting
 traversal attempts (`../`, absolute paths) before any I/O happens.
@@ -254,6 +279,8 @@ environment variables:
 | `AGENTS_TEMPERATURE` | Sampling temperature | `0.1` |
 | `PM_WORKSPACE` | Workspace root directory | `./workspace` |
 | `MAX_ASSIGN_TASKS` | Delegation budget per user request | `12` |
+| `MAX_HISTORY_MESSAGES` | Messages kept in a specialist's history before trimming | `60` |
+| `DEFAULT_RESPONSE_LANGUAGE` | Response language before detection (ISO 639-1) | `id` |
 
 Per-agent overrides use the agent's prefix — `PM_`, `BA_`, `FRONTEND_`, `BACKEND_`, `QA_`:
 
@@ -276,6 +303,8 @@ appbuilder/
 ├── app/
 │   ├── agent.py        # tools, guardrails, specialist loop, PM graph
 │   ├── config.py       # per-agent config + system prompts
+│   ├── protocol.py     # OK/FAILED + DONE/PARTIAL/BLOCKED tokens (single source of truth)
+│   ├── language.py     # response-language detection, stickiness, prompt directive
 │   ├── server.py       # FastAPI + WebSocket streaming
 │   └── static/
 │       └── index.html  # single-file UI: per-agent tabs, file tree

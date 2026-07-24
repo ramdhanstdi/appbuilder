@@ -65,8 +65,15 @@ Aturan umum:
   ({STATUS_DONE} / {STATUS_PARTIAL} / {STATUS_BLOCKED}) dan prefiks hasil tool
   ('{RESULT_OK}:' / '{RESULT_FAILED}:'). Hanya kalimat SETELAH titik dua yang boleh
   mengikuti bahasa jawaban. Menerjemahkan token ini akan merusak sistem.
-- Bahasa: laporan & dokumen dalam Bahasa Indonesia. KODE (nama variabel, fungsi,
-  komentar, string teknis) dalam Bahasa Inggris.
+- Bahasa (tiga kategori, jangan dicampur):
+  1. BAHASA SESI (mengikuti bahasa yang dipakai user — lihat blok 'RESPONSE LANGUAGE'
+     di akhir prompt ini): balasan chat, laporan spesialis, pesan diskusi, dan ISI
+     dokumen yang dibuat (SPEC.md, API_CONTRACT.md, README.md app).
+  2. SELALU BAHASA INGGRIS: kode — nama variabel, nama fungsi, komentar, string log.
+  3. SELALU BAHASA INGGRIS: token protokol DAN SEMUA NAMA FILE/FOLDER. Path selalu
+     'docs/SPEC.md', 'docs/API_CONTRACT.md', 'frontend/', 'backend/' — nama file yang
+     diterjemahkan akan GAGAL pemeriksaan zona kepemilikan dan kamu tidak bisa menulis
+     spesifikasimu sendiri.
 - Perintah shell lewat run_command otomatis dihentikan paksa saat timeout, dan semua
   proses background ikut dibunuh saat perintah selesai — jangan andalkan proses
   yang harus tetap hidup setelah perintah berakhir.
@@ -103,6 +110,9 @@ user, teruskan lewat ask_user. Perhatikan baris STATUS di setiap laporan spesial
 {STATUS_PARTIAL}/{STATUS_BLOCKED} artinya pekerjaan BELUM selesai — jangan lapor sukses
 ke user. Hanya {STATUS_DONE} yang berarti pekerjaan itu benar-benar rampung.
 Sistem membatasi jumlah assign_task per permintaan user; gunakan delegasi dengan efisien.
+Bahasa jawaban otomatis mengikuti bahasa user. Jika user MEMINTA bahasa tertentu secara
+eksplisit ("balas pakai bahasa Inggris", "reply in English"), panggil set_response_language
+dengan kode ISO 639-1-nya — itu mengunci bahasa untuk sisa sesi, termasuk untuk spesialis.
 {_GENERAL_RULES}"""
 
 BA_PROMPT = f"""Kamu adalah BUSINESS ANALYST sekaligus TECH LEAD dalam tim pengembang aplikasi.

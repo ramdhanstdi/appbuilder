@@ -107,26 +107,98 @@
 </head>
 <body>
   <header>
-    <h1>🤖 App Builder — Tim Multi-Agent</h1>
-    <span id="status">menghubungkan…</span>
+    <h1 id="app-title">🤖 App Builder</h1>
+    <span id="status"></span>
   </header>
   <main>
     <div id="chat-col">
       <div id="tabs"></div>
       <div id="panes" style="flex:1; display:flex; flex-direction:column; min-height:0;"></div>
       <div id="input-bar">
-        <textarea id="input" rows="1" placeholder="Beri perintah ke Project Manager…"></textarea>
-        <button id="send">Kirim</button>
+        <textarea id="input" rows="1"></textarea>
+        <button id="send"></button>
       </div>
-      <div id="input-hint">Kamu hanya berbicara dengan PM — dia yang mengatur seluruh tim. Tab lain untuk memantau kerja tiap agent.</div>
+      <div id="input-hint"></div>
     </div>
     <div id="files-col">
-      <h2>📁 Workspace</h2>
-      <div id="file-tree"><div class="ft-empty">Belum ada file.</div></div>
+      <h2 id="files-title">📁 Workspace</h2>
+      <div id="file-tree"></div>
     </div>
   </main>
 
 <script>
+  // ---------------------------------------------------------------------------
+  // Interface strings. The server emits {type:"language", code:"<iso>"} whenever the
+  // session language changes; unmapped languages fall back to English. Agent prose
+  // arrives already in the session language — only this chrome is translated here.
+  // ---------------------------------------------------------------------------
+  const I18N = {
+    id: {
+      title: "🤖 App Builder — Tim Multi-Agent",
+      connecting: "menghubungkan…",
+      ready: "siap",
+      teamWorking: "Tim sedang bekerja…",
+      agentWorking: (n) => `${n} sedang bekerja…`,
+      waitingAnswer: "menunggu jawabanmu",
+      disconnected: "terputus — menyambung ulang…",
+      placeholder: "Beri perintah ke Project Manager…",
+      send: "Kirim",
+      hint: "Kamu hanya berbicara dengan PM — dia yang mengatur seluruh tim. Tab lain untuk memantau kerja tiap agent.",
+      filesTitle: "📁 Workspace",
+      filesEmpty: "Belum ada file.",
+      labelTask: "📥 Tugas dari PM",
+      labelPeerIn: (n) => `💬 Pesan dari ${n}`,
+      labelPeerReply: (n) => `💬 Balasan dari ${n}`,
+      labelReport: "📤 Laporan spesialis",
+      labelQuestion: "PM bertanya — jawab di bawah",
+      retry: "mencoba ulang…",
+      errorPrefix: "Terjadi masalah saat eksekusi: ",
+      actions: {
+        write_file: (t) => `menulis file: ${t}`,
+        read_file: (t) => `membaca file: ${t}`,
+        list_files: (t) => `melihat struktur: ${t}`,
+        run_command: (t) => `menjalankan: ${t}`,
+        ask_user: () => "bertanya ke user",
+        assign_task: (t) => `menugaskan ${t}`,
+        discuss_with: (t) => `berdiskusi dengan ${t}`,
+        set_language: (t) => `mengunci bahasa jawaban: ${t}`,
+      },
+    },
+    en: {
+      title: "🤖 App Builder — Multi-Agent Team",
+      connecting: "connecting…",
+      ready: "ready",
+      teamWorking: "The team is working…",
+      agentWorking: (n) => `${n} is working…`,
+      waitingAnswer: "waiting for your answer",
+      disconnected: "disconnected — reconnecting…",
+      placeholder: "Tell the Project Manager what to build…",
+      send: "Send",
+      hint: "You only talk to the PM — they coordinate the whole team. The other tabs let you watch each agent work.",
+      filesTitle: "📁 Workspace",
+      filesEmpty: "No files yet.",
+      labelTask: "📥 Task from PM",
+      labelPeerIn: (n) => `💬 Message from ${n}`,
+      labelPeerReply: (n) => `💬 Reply from ${n}`,
+      labelReport: "📤 Specialist report",
+      labelQuestion: "The PM is asking — answer below",
+      retry: "retrying…",
+      errorPrefix: "Something went wrong during execution: ",
+      actions: {
+        write_file: (t) => `writing file: ${t}`,
+        read_file: (t) => `reading file: ${t}`,
+        list_files: (t) => `listing: ${t}`,
+        run_command: (t) => `running: ${t}`,
+        ask_user: () => "asking the user",
+        assign_task: (t) => `assigning ${t}`,
+        discuss_with: (t) => `discussing with ${t}`,
+        set_language: (t) => `pinning response language: ${t}`,
+      },
+    },
+  };
+
+  let lang = I18N.id;
+
   const tabsEl = document.getElementById("tabs");
   const panesEl = document.getElementById("panes");
   const inputEl = document.getElementById("input");
@@ -141,6 +213,32 @@
   let sessionThreadId = null;   // set from the "session" event; scopes the file tree
 
   function setStatus(cls, text) { statusEl.className = cls; statusEl.textContent = text; }
+
+  function applyLanguage(code) {
+    lang = I18N[(code || "").toLowerCase()] || I18N.en;
+    document.documentElement.lang = code || "en";
+    document.getElementById("app-title").textContent = lang.title;
+    document.title = lang.title.replace(/^\S+\s/, "");
+    document.getElementById("files-title").textContent = lang.filesTitle;
+    inputEl.placeholder = lang.placeholder;
+    sendEl.textContent = lang.send;
+    document.getElementById("input-hint").textContent = lang.hint;
+    if (statusEl.className === "online" || !statusEl.textContent) {
+      setStatus(statusEl.className, lang.ready);
+    }
+    if (!treeEl.children.length || treeEl.querySelector(".ft-empty")) {
+      treeEl.innerHTML = `<div class="ft-empty">${lang.filesEmpty}</div>`;
+    }
+  }
+
+  /** Render a structured tool-call payload from the server in the session language. */
+  function renderAction(detail, fallbackName) {
+    if (!detail) return fallbackName || "";
+    if (typeof detail === "string") return detail;   // tolerate older payloads
+    const fn = lang.actions[detail.action];
+    if (!fn) return detail.action || fallbackName || "";
+    return fn(detail.target_name || detail.target || "?");
+  }
 
   function setBusy(b) {
     busy = b;
@@ -194,7 +292,7 @@
       const tab = document.getElementById("tab-" + agentKey);
       if (tab) tab.classList.add("busy");
       const info = agentsInfo[agentKey];
-      if (info) setStatus("working", `${info.name} sedang bekerja…`);
+      if (info) setStatus("working", lang.agentWorking(info.name));
     }
   }
 
@@ -234,7 +332,7 @@
         : "/api/files";
       const res = await fetch(url);
       const items = await res.json();
-      if (!items.length) { treeEl.innerHTML = '<div class="ft-empty">Belum ada file.</div>'; return; }
+      if (!items.length) { treeEl.innerHTML = `<div class="ft-empty">${lang.filesEmpty}</div>`; return; }
       treeEl.innerHTML = "";
       for (const it of items) {
         const div = document.createElement("div");
@@ -253,12 +351,15 @@
         sessionThreadId = msg.thread_id;
         refreshFiles();
         break;
+      case "language":
+        applyLanguage(msg.code);
+        break;
       case "retry":
-        addActivity(agent, "call", "🔁 " + (msg.content || "mencoba ulang…"));
+        addActivity(agent, "call", "🔁 " + (msg.content || lang.retry));
         markBusy(agent);
         break;
       case "working":
-        setStatus("working", "Tim sedang bekerja…");
+        setStatus("working", lang.teamWorking);
         markBusy("pm");
         break;
       case "msg":
@@ -266,36 +367,36 @@
         markBusy(agent);
         break;
       case "task":
-        addMsg(agent, "task", msg.content, "📥 Tugas dari PM");
+        addMsg(agent, "task", msg.content, lang.labelTask);
         markBusy(agent);
         break;
       case "peer_in": {
         const from = agentsInfo[msg.from] || { name: msg.from, emoji: "💬" };
-        addMsg(agent, "peer-in", msg.content, `💬 Pesan dari ${from.emoji} ${from.name}`);
+        addMsg(agent, "peer-in", msg.content, lang.labelPeerIn(`${from.emoji} ${from.name}`));
         markBusy(agent);
         break;
       }
       case "peer_reply": {
         const from = agentsInfo[msg.from] || { name: msg.from, emoji: "💬" };
-        addMsg(agent, "peer-reply", msg.content, `💬 Balasan dari ${from.emoji} ${from.name}`);
+        addMsg(agent, "peer-reply", msg.content, lang.labelPeerReply(`${from.emoji} ${from.name}`));
         markBusy(agent);
         break;
       }
       case "report":
-        addMsg("pm", "report", msg.content, "📤 Laporan spesialis");
+        addMsg("pm", "report", msg.content, lang.labelReport);
         markBusy("pm");
         refreshFiles();
         break;
       case "question":
-        addMsg("pm", "question", msg.content, "PM bertanya — jawab di bawah");
-        setStatus("question", "menunggu jawabanmu");
+        addMsg("pm", "question", msg.content, lang.labelQuestion);
+        setStatus("question", lang.waitingAnswer);
         markBusy(null);
         setBusy(false);
         switchTab("pm");
         refreshFiles();
         break;
       case "tool_call":
-        addActivity(agent, "call", "⚙️ " + (msg.detail || msg.name));
+        addActivity(agent, "call", "⚙️ " + renderAction(msg.detail, msg.name));
         markBusy(agent);
         break;
       case "tool_result":
@@ -304,10 +405,10 @@
         refreshFiles();
         break;
       case "error":
-        addMsg("pm", "error", msg.content);
+        addMsg("pm", "error", lang.errorPrefix + msg.content);
         break;
       case "done":
-        setStatus("online", "siap");
+        setStatus("online", lang.ready);
         markBusy(null);
         setBusy(false);
         refreshFiles();
@@ -318,9 +419,9 @@
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(proto + "//" + location.host + "/ws");
-    ws.onopen = () => { setStatus("online", "siap"); setBusy(false); };
+    ws.onopen = () => { setStatus("online", lang.ready); setBusy(false); };
     ws.onclose = () => {
-      setStatus("", "terputus — menyambung ulang…");
+      setStatus("", lang.disconnected);
       setBusy(true);
       setTimeout(connect, 2000);
     };
@@ -348,6 +449,8 @@
   });
 
   (async () => {
+    applyLanguage("id");
+    setStatus("", lang.connecting);
     const res = await fetch("/api/agents");
     buildTabs(await res.json());
     connect();

@@ -32,6 +32,13 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 
 from app.config import AGENTS, SPECIALISTS
+from app.language import (
+    effective_language,
+    forget_session,
+    language_directive,
+    language_name,
+    pin_language,
+)
 from app.protocol import STATUS_PARTIAL, failed, is_failure, ok
 
 # ==========================================
@@ -220,6 +227,7 @@ def cleanup_session(thread_id: str) -> None:
     """Release all in-process state held for a finished session."""
     _SPECIALIST_HISTORY.pop(thread_id, None)
     _ASSIGN_BUDGET.pop(thread_id, None)
+    forget_session(thread_id)
 
 
 # Zona kepemilikan file per agent, dicek DI LEVEL TOOL (bukan sekadar prompt).
@@ -253,25 +261,33 @@ def _zone_error(agent_key: str, file_path: str) -> str | None:
                   f"Ask the owner of that path to change it via discuss_with.")
 
 
-def summarize_args(name: str, args: dict) -> str:
-    """Ringkasan tool call yang enak dibaca di UI."""
-    if name == "write_code_file":
-        return f"menulis file: {args.get('file_path', '?')}"
-    if name == "read_code_file":
-        return f"membaca file: {args.get('file_path', '?')}"
+def summarize_args(name: str, args: dict) -> dict:
+    """Structured description of a tool call for the UI.
+
+    Returns a payload, not a sentence: the label is rendered client-side in the session
+    language, so no server-side translation table is needed and presentation stays in the
+    presentation layer.
+    """
+    args = args or {}
+    if name in ("write_code_file", "read_code_file"):
+        action = "write_file" if name == "write_code_file" else "read_file"
+        return {"action": action, "target": args.get("file_path", "?")}
     if name == "list_files":
-        return f"melihat struktur: {args.get('path', '.')}"
+        return {"action": "list_files", "target": args.get("path", ".")}
     if name == "run_command":
-        return f"menjalankan: {args.get('command', '?')}"
+        return {"action": "run_command", "target": args.get("command", "?")}
     if name == "ask_user":
-        return "bertanya ke user"
-    if name == "assign_task":
-        target = AGENTS.get(args.get("agent", ""), {}).get("name", args.get("agent", "?"))
-        return f"menugaskan {target}"
-    if name == "discuss_with":
-        target = AGENTS.get(args.get("agent", ""), {}).get("name", args.get("agent", "?"))
-        return f"berdiskusi dengan {target}"
-    return name
+        return {"action": "ask_user"}
+    if name == "set_response_language":
+        return {"action": "set_language", "target": args.get("language_code", "?")}
+    if name in ("assign_task", "discuss_with"):
+        key = args.get("agent", "")
+        return {
+            "action": "assign_task" if name == "assign_task" else "discuss_with",
+            "target": key or "?",
+            "target_name": AGENTS.get(key, {}).get("name", key or "?"),
+        }
+    return {"action": name}
 
 
 def _text_of(content) -> str:
@@ -395,7 +411,7 @@ async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain:
     reply = await _run_specialist(
         target, message, thread_id, source=sender_key, chain=chain + (sender_key,)
     )
-    return f"💬 Balasan dari {AGENTS[target]['name']}:\n{reply}"
+    return f"💬 Reply from {AGENTS[target]['name']}:\n{reply}"
 
 
 async def _run_specialist(
@@ -419,12 +435,13 @@ async def _run_specialist(
     bucket = _SPECIALIST_HISTORY.setdefault(thread_id, {})
     history = bucket.setdefault(agent_key, [])
     if source == "pm":
-        history.append(HumanMessage(content=f"📥 Tugas dari Project Manager:\n{content}"))
+        history.append(HumanMessage(content=f"📥 Task from the Project Manager:\n{content}"))
         writer({"agent": agent_key, "type": "task", "content": content})
     else:
         sender_name = AGENTS[source]["name"]
         history.append(HumanMessage(
-            content=f"💬 Pesan diskusi dari {sender_name} (jawab langsung ke intinya):\n{content}"
+            content=f"💬 Discussion message from {sender_name} "
+                    f"(answer directly and to the point):\n{content}"
         ))
         writer({"agent": agent_key, "type": "peer_in", "from": source, "content": content})
 
@@ -433,7 +450,14 @@ async def _run_specialist(
         # later appends land on the same (trimmed) list.
         history = _trim_history(history)
         bucket[agent_key] = history
-        messages = [SystemMessage(content=cfg["prompt"])] + history
+        # Language is appended per invocation, never written back into AGENTS[key]["prompt"]:
+        # that dict is shared module state and mutating it would leak this session's
+        # language into every other session.
+        messages = [
+            SystemMessage(
+                content=cfg["prompt"] + language_directive(effective_language(thread_id))
+            )
+        ] + history
         response = await _invoke_with_retry(llm, messages, agent_key=agent_key, writer=writer)
         history.append(response)
 
@@ -519,7 +543,7 @@ async def assign_task(agent: str, task: str, config: RunnableConfig) -> str:
                       f"the work for the user (what is done and what is not).")
 
     report = await _run_specialist(agent, task, thread_id)
-    return f"📤 Laporan dari {AGENTS[agent]['name']}:\n{report}"
+    return f"📤 Report from {AGENTS[agent]['name']}:\n{report}"
 
 
 @tool
@@ -532,7 +556,22 @@ def ask_user(question: str) -> str:
     return str(answer)
 
 
-PM_TOOLS = [assign_task, ask_user, list_files, read_code_file]
+@tool
+def set_response_language(language_code: str, config: RunnableConfig) -> str:
+    """Pin the language used for every human-facing reply, report, and generated document.
+    Use ONLY when the user explicitly asks for a language ("reply in English",
+    "pakai bahasa Indonesia saja"). Otherwise the language follows what the user writes.
+    language_code: ISO 639-1 code, e.g. 'en', 'id', 'ja'.
+    """
+    code = (language_code or "").strip().lower()
+    if not code or not code.replace("-", "").isalpha() or len(code) > 7:
+        return failed(f"'{language_code}' is not a valid ISO 639-1 language code.")
+    thread_id = (config.get("configurable") or {}).get("thread_id", "default")
+    pin_language(thread_id, code)
+    return ok(f"response language pinned to {language_name(code)} ({code}).")
+
+
+PM_TOOLS = [assign_task, ask_user, list_files, read_code_file, set_response_language]
 
 _pm_llm = _make_llm("pm").bind_tools(PM_TOOLS)
 
@@ -544,8 +583,13 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
 
 
-async def project_manager(state: State):
-    messages = [SystemMessage(content=AGENTS["pm"]["prompt"])] + state["messages"]
+async def project_manager(state: State, config: RunnableConfig):
+    thread_id = (config.get("configurable") or {}).get("thread_id", "default")
+    messages = [
+        SystemMessage(
+            content=AGENTS["pm"]["prompt"] + language_directive(effective_language(thread_id))
+        )
+    ] + state["messages"]
     try:
         writer = get_stream_writer()
     except Exception:
