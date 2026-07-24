@@ -17,6 +17,7 @@ bin
 # Environment / secrets
 .env
 .env.*
+!.env.example
 
 # Node (workspace subprojects)
 node_modules/

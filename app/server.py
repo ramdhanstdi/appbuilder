@@ -21,7 +21,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
-from app.agent import WORKSPACE, _text_of, build_graph, reset_task_budget, summarize_args
+from app.agent import (
+    WORKSPACE,
+    _text_of,
+    build_graph,
+    cleanup_session,
+    reset_task_budget,
+    set_session_workspace,
+    summarize_args,
+)
 from app.config import AGENTS
 
 app = FastAPI(title="App Builder — Tim Multi-Agent")
@@ -44,13 +52,31 @@ async def agents():
     ])
 
 
+def _session_dir(thread_id: str | None) -> str:
+    """Resolve a session's workspace directory, jailed under WORKSPACE.
+
+    A missing or unsafe thread_id falls back to the base workspace so traversal via the
+    query string is impossible (only a single path segment inside WORKSPACE is honored).
+    """
+    if not thread_id:
+        return WORKSPACE
+    segment = os.path.basename(thread_id.strip())
+    full = os.path.abspath(os.path.join(WORKSPACE, segment))
+    if full == WORKSPACE or full.startswith(WORKSPACE + os.sep):
+        return full
+    return WORKSPACE
+
+
 @app.get("/api/files")
-async def files():
-    """Struktur file workspace untuk panel di browser."""
+async def files(thread_id: str | None = None):
+    """Struktur file untuk panel di browser — hanya milik sesi ini (thread_id)."""
+    root_dir = _session_dir(thread_id)
     tree = []
-    for root, dirs, filenames in os.walk(WORKSPACE):
+    if not os.path.isdir(root_dir):
+        return JSONResponse(tree)
+    for root, dirs, filenames in os.walk(root_dir):
         dirs[:] = sorted(d for d in dirs if d not in ("node_modules", ".git", "dist", "__pycache__"))
-        rel = os.path.relpath(root, WORKSPACE)
+        rel = os.path.relpath(root, root_dir)
         depth = 0 if rel == "." else rel.count(os.sep) + 1
         if depth > 5:
             dirs[:] = []
@@ -72,8 +98,13 @@ async def files():
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     thread_id = str(uuid.uuid4())
+    # Isolate this session's generated files under WORKSPACE/<thread_id>/.
+    set_session_workspace(thread_id)
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 200}
     waiting_for_answer = False
+
+    # Let the client scope its file-tree requests to this session.
+    await ws.send_json({"type": "session", "thread_id": thread_id})
 
     try:
         while True:
@@ -145,6 +176,9 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "done"})
     except WebSocketDisconnect:
         pass
+    finally:
+        # Release per-session in-process state on both normal disconnect and exception.
+        cleanup_session(thread_id)
 
 
 if __name__ == "__main__":

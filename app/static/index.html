@@ -138,6 +138,7 @@
   let busy = false;
   let agentsInfo = {};   // key -> {name, emoji}
   let activeTab = "pm";
+  let sessionThreadId = null;   // set from the "session" event; scopes the file tree
 
   function setStatus(cls, text) { statusEl.className = cls; statusEl.textContent = text; }
 
@@ -228,7 +229,10 @@
 
   async function refreshFiles() {
     try {
-      const res = await fetch("/api/files");
+      const url = sessionThreadId
+        ? "/api/files?thread_id=" + encodeURIComponent(sessionThreadId)
+        : "/api/files";
+      const res = await fetch(url);
       const items = await res.json();
       if (!items.length) { treeEl.innerHTML = '<div class="ft-empty">Belum ada file.</div>'; return; }
       treeEl.innerHTML = "";
@@ -245,6 +249,14 @@
   function handleEvent(msg) {
     const agent = msg.agent || "pm";
     switch (msg.type) {
+      case "session":
+        sessionThreadId = msg.thread_id;
+        refreshFiles();
+        break;
+      case "retry":
+        addActivity(agent, "call", "🔁 " + (msg.content || "mencoba ulang…"));
+        markBusy(agent);
+        break;
       case "working":
         setStatus("working", "Tim sedang bekerja…");
         markBusy("pm");

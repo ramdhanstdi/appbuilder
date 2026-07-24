@@ -11,7 +11,10 @@ Arsitektur:
 - `ask_user` (hanya milik PM) memakai interrupt(): eksekusi berhenti sampai user menjawab.
 """
 
+import asyncio
+import contextvars
 import os
+import random
 import subprocess
 from typing import Annotated
 
@@ -37,12 +40,28 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.environ.get("PM_WORKSPACE", os.path.join(_BASE_DIR, "workspace"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
+# Per-session workspace root. A ContextVar (not a parameter) so the value propagates
+# implicitly through async LangGraph tool execution without threading it everywhere.
+# Defaults to the shared WORKSPACE so tools work outside a WebSocket session (e.g. tests).
+_SESSION_ROOT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_SESSION_ROOT", default=WORKSPACE
+)
+
+
+def set_session_workspace(thread_id: str) -> str:
+    """Create WORKSPACE/<thread_id>/ for a session, pin it on the ContextVar, return it."""
+    root = os.path.abspath(os.path.join(WORKSPACE, thread_id))
+    os.makedirs(root, exist_ok=True)
+    _SESSION_ROOT.set(root)
+    return root
+
 
 def _safe_path(path: str) -> str:
-    """Kunci semua operasi file agar tidak bisa keluar dari folder WORKSPACE."""
+    """Kunci semua operasi file agar tidak bisa keluar dari root workspace sesi ini."""
+    root = _SESSION_ROOT.get()
     cleaned = path.lstrip("/\\")
-    full = os.path.abspath(os.path.join(WORKSPACE, cleaned))
-    if not (full == WORKSPACE or full.startswith(WORKSPACE + os.sep)):
+    full = os.path.abspath(os.path.join(root, cleaned))
+    if not (full == root or full.startswith(root + os.sep)):
         raise ValueError(f"Akses ditolak: path '{path}' berada di luar workspace.")
     return full
 
@@ -62,7 +81,7 @@ def write_code_file(file_path: str, content: str) -> str:
             os.makedirs(directory, exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"SUKSES: File tersimpan di {os.path.relpath(full, WORKSPACE)}"
+        return f"SUKSES: File tersimpan di {os.path.relpath(full, _SESSION_ROOT.get())}"
     except Exception as e:
         return f"GAGAL menulis file: {e}"
 
@@ -88,10 +107,11 @@ def list_files(path: str = ".") -> str:
         full = _safe_path(path)
         if not os.path.exists(full):
             return f"Folder '{path}' belum ada. Workspace masih kosong di lokasi itu."
+        session_root = _SESSION_ROOT.get()
         lines = []
         for root, dirs, files in os.walk(full):
             dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "dist", "__pycache__")]
-            rel_root = os.path.relpath(root, WORKSPACE)
+            rel_root = os.path.relpath(root, session_root)
             depth = 0 if rel_root == "." else rel_root.count(os.sep) + 1
             if depth > 4:
                 dirs[:] = []
@@ -194,6 +214,12 @@ def reset_task_budget(thread_id: str) -> None:
     _ASSIGN_BUDGET[thread_id] = 0
 
 
+def cleanup_session(thread_id: str) -> None:
+    """Release all in-process state held for a finished session."""
+    _SPECIALIST_HISTORY.pop(thread_id, None)
+    _ASSIGN_BUDGET.pop(thread_id, None)
+
+
 # Zona kepemilikan file per agent, dicek DI LEVEL TOOL (bukan sekadar prompt).
 # Path pertama = folder app; sisanya dicocokkan ke zona ini.
 # Agent yang tidak terdaftar di sini (misal 'qa') sama sekali tidak boleh menulis.
@@ -292,6 +318,59 @@ _SPECIALIST_HISTORY: dict[str, dict[str, list]] = {}
 
 MAX_SPECIALIST_STEPS = 40
 
+# Batas jumlah pesan yang disimpan dalam history satu spesialis. History menumpuk lintas
+# assign_task dalam satu sesi; tanpa batas, biaya token tumbuh tanpa henti.
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "60"))
+
+
+def _trim_history(history: list) -> list:
+    """Keep the most recent MAX_HISTORY_MESSAGES messages without orphaning tool plumbing.
+
+    A ToolMessage must stay attached to the AIMessage.tool_calls that produced it. If the
+    cut lands on an orphaned ToolMessage (its AIMessage was dropped), advance the boundary
+    past those leading ToolMessages so the window starts on a clean pair boundary. The
+    result therefore never begins with a ToolMessage and never contains an AIMessage whose
+    tool_calls lost their replies.
+    """
+    if len(history) <= MAX_HISTORY_MESSAGES:
+        return history
+    start = len(history) - MAX_HISTORY_MESSAGES
+    while start < len(history) and isinstance(history[start], ToolMessage):
+        start += 1
+    return history[start:]
+
+
+# Base backoff delay (seconds). Overridable via env and monkeypatchable in tests so the
+# suite stays fast; actual waits are _RETRY_BASE_DELAY * 2**attempt plus jitter.
+_RETRY_BASE_DELAY = float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0"))
+
+
+async def _invoke_with_retry(llm, messages, *, attempts: int = 3, agent_key: str = "pm",
+                             writer=None):
+    """Invoke an LLM, retrying transient failures with exponential backoff + jitter.
+
+    Retries on any exception up to `attempts` times (delays 1s, 2s, 4s * base plus jitter),
+    emitting a `retry` stream event before each wait. Re-raises after the final attempt so
+    the caller can surface a real error rather than silently degrading.
+    """
+    for attempt in range(attempts):
+        try:
+            return await llm.ainvoke(messages)
+        except Exception as e:
+            if attempt == attempts - 1:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, _RETRY_BASE_DELAY)
+            if writer is not None:
+                try:
+                    writer({
+                        "agent": agent_key, "type": "retry",
+                        "content": (f"LLM call failed ({e}); retrying in {delay:.1f}s "
+                                    f"(attempt {attempt + 2}/{attempts})"),
+                    })
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+
 
 async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain: tuple) -> str:
     """Tangani pemanggilan discuss_with oleh seorang spesialis.
@@ -335,7 +414,8 @@ async def _run_specialist(
         llm = _SPECIALIST_LLMS[agent_key]
     writer = get_stream_writer()
 
-    history = _SPECIALIST_HISTORY.setdefault(thread_id, {}).setdefault(agent_key, [])
+    bucket = _SPECIALIST_HISTORY.setdefault(thread_id, {})
+    history = bucket.setdefault(agent_key, [])
     if source == "pm":
         history.append(HumanMessage(content=f"📥 Tugas dari Project Manager:\n{content}"))
         writer({"agent": agent_key, "type": "task", "content": content})
@@ -347,8 +427,12 @@ async def _run_specialist(
         writer({"agent": agent_key, "type": "peer_in", "from": source, "content": content})
 
     for _ in range(MAX_SPECIALIST_STEPS):
+        # Bound token growth: trim before each turn, keeping the shared bucket in sync so
+        # later appends land on the same (trimmed) list.
+        history = _trim_history(history)
+        bucket[agent_key] = history
         messages = [SystemMessage(content=cfg["prompt"])] + history
-        response = await llm.ainvoke(messages)
+        response = await _invoke_with_retry(llm, messages, agent_key=agent_key, writer=writer)
         history.append(response)
 
         text = _text_of(response.content)
@@ -459,7 +543,11 @@ class State(TypedDict):
 
 async def project_manager(state: State):
     messages = [SystemMessage(content=AGENTS["pm"]["prompt"])] + state["messages"]
-    response = await _pm_llm.ainvoke(messages)
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+    response = await _invoke_with_retry(_pm_llm, messages, agent_key="pm", writer=writer)
     return {"messages": [response]}
 
 
