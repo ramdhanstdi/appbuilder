@@ -1,0 +1,28 @@
+# The runner image: where agent shell commands actually execute.
+#
+# Deliberately minimal — Node.js, Python, and just enough to smoke-test a server. It has
+# no source code, no credentials, and no access to anything but the session workspace
+# that gets mounted into it at run time.
+#
+#   docker build -f Dockerfile.runner -t appbuilder-runner:latest .
+
+FROM node:20-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-venv curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# node:20 already ships uid/gid 1000 as 'node'. Commands run as this non-root user
+# (see RUNNER_USER); root inside the container is never used.
+USER 1000:1000
+
+WORKDIR /workspace
+
+# npm writes its cache and logs to $HOME, which is not writable for an arbitrary uid.
+ENV HOME=/tmp \
+    npm_config_cache=/tmp/.npm \
+    npm_config_update_notifier=false
+
+CMD ["sh"]

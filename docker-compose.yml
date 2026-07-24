@@ -1,0 +1,54 @@
+# Run the whole stack:
+#
+#   docker compose build          # builds both the app and the runner image
+#   docker compose up             # server on http://localhost:8020
+#
+# Agent shell commands are executed in one-shot `appbuilder-runner` containers started by
+# the server through the mounted Docker socket. They share this service's workspace volume
+# via --volumes-from, so the runner sees the session workspace at the same path and
+# nothing else from the host.
+
+services:
+  app:
+    build: .
+    container_name: appbuilder
+    ports:
+      - "8020:8020"
+    env_file:
+      - .env
+    environment:
+      # Reuse this container's mounts in the runner, so no host path translation is needed.
+      RUNNER_VOLUMES_FROM: appbuilder
+      RUNNER_IMAGE: appbuilder-runner:latest
+      # Outbound network is off by default; set to 'bridge' if a task must install packages.
+      RUNNER_NETWORK: none
+      RUNNER_MEMORY: 512m
+      RUNNER_CPUS: "2"
+      RUNNER_USER: "1000:1000"
+      PM_WORKSPACE: /srv/appbuilder/workspace
+      RUNS_DIR: /srv/appbuilder/runs
+    volumes:
+      - workspace:/srv/appbuilder/workspace
+      - runs:/srv/appbuilder/runs
+      # The server needs the socket to launch runner containers. This is a real grant of
+      # host-level privilege to the server process — the isolation this buys applies to
+      # agent commands, not to the server itself. Do not expose this service publicly.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      runner-image:
+        condition: service_completed_successfully
+
+  # Build-only service: produces appbuilder-runner:latest, then exits. It is never a
+  # long-running container — the server starts one per command instead.
+  runner-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: appbuilder-runner:latest
+    command: ["true"]
+    restart: "no"
+
+volumes:
+  workspace:
+  runs:

@@ -32,7 +32,8 @@ Most multi-agent demos fail in the same predictable ways:
 
 | Failure mode | How this project handles it |
 |---|---|
-| An agent runs `npm run dev` and hangs the orchestrator forever | Every shell command runs in its own process group and is force-killed on completion **and** on timeout |
+| An agent runs `npm run dev` and hangs the orchestrator forever | Every shell command runs in a disposable container and its own process group, force-killed on completion **and** on timeout |
+| An agent's shell command reads your SSH keys | Commands execute in a container that mounts only the session workspace, with no network and no root |
 | The QA agent silently fixes its own findings and reports "PASS" | QA has **no write tool at all** — it is a structurally pure reviewer |
 | Two agents negotiate an API contract in chat, then both forget it | The contract is a **file** (`docs/API_CONTRACT.md`) with a single owning agent |
 | Agent A asks B, B asks A, forever, burning tokens | Cycle detection + depth limit, enforced by **removing the tool from the model binding** |
@@ -153,14 +154,25 @@ The same principle applies to file ownership: `_zone_error()` runs *before*
 `write_code_file` executes, and QA has no entry in `_WRITE_ZONES` — so "QA must not patch
 its own findings" is a property of the system, not a request to the model.
 
-### 2. Shell execution cannot leak processes
+### 2. Shell execution is contained twice over
 
-`run_command` starts every command in a new session (`start_new_session=True`), so the
-command and all of its children share one process group. That group is `SIGKILL`ed on
-timeout **and** in a `finally` block after normal completion.
+Agent commands run inside a one-shot container: only the session workspace is mounted, so
+a command cannot read the host filesystem; networking is off by default (loopback still
+works, so QA smoke tests do); memory, CPU, and pids are capped; and it runs as a non-root
+user with `no-new-privileges`. The command string reaches Docker as a single argv element,
+so nothing inside it can rewrite the invocation around it.
+
+The process-group kill stays as the second layer. `run_command` starts every command in a
+new session (`start_new_session=True`), so the command and all of its children share one
+process group, and that group is `SIGKILL`ed on timeout **and** in a `finally` block after
+normal completion — after the container itself is killed.
 
 The second kill is the one people forget: a command that "succeeds" can still leave a
 backgrounded server running. Here it cannot.
+
+`ALLOW_UNSANDBOXED_COMMANDS=true` drops back to direct host execution for local
+development without Docker. That is a real removal of the boundary, not a nicety — see
+[Known limitations](#known-limitations).
 
 This turns a constraint into a capability — QA can start a server, curl it, and read the
 log in a single command, knowing cleanup is guaranteed:
@@ -270,10 +282,22 @@ cp .env.example .env
 ### Run
 
 ```bash
-python -m app.server
+docker compose build     # builds the app image and the minimal runner image
+docker compose up
 ```
 
 Open <http://localhost:8020>.
+
+Running with Docker is the default posture because agent shell commands execute in an
+isolated runner container. To run the server directly on the host instead:
+
+```bash
+python -m app.server
+```
+
+That still uses containerized commands and therefore needs a reachable Docker daemon plus
+the runner image (`docker build -f Dockerfile.runner -t appbuilder-runner:latest .`). With
+no Docker at all, set `ALLOW_UNSANDBOXED_COMMANDS=true` — read the limitations first.
 
 Generated applications appear under `workspace/<session-id>/`.
 
@@ -321,6 +345,12 @@ environment variables:
 | `RUNS_DIR` | Where per-request metrics records are written | `./runs` |
 | `MAX_HISTORY_MESSAGES` | Messages kept in a specialist's history before trimming | `60` |
 | `DEFAULT_RESPONSE_LANGUAGE` | Response language before detection (ISO 639-1) | `id` |
+| `ALLOW_UNSANDBOXED_COMMANDS` | Run agent commands directly on the host instead of in a container | unset (sandboxed) |
+| `RUNNER_IMAGE` | Image used to execute agent commands | `appbuilder-runner:latest` |
+| `RUNNER_NETWORK` | Docker network for the runner (`bridge` to allow installs) | `none` |
+| `RUNNER_MEMORY` / `RUNNER_CPUS` | Resource caps for the runner | `512m` / `2` |
+| `RUNNER_USER` | uid:gid the command runs as | `1000:1000` |
+| `RUNNER_VOLUMES_FROM` | Reuse this container's mounts (set by docker-compose) | unset |
 
 Per-agent overrides use the agent's prefix — `PM_`, `BA_`, `FRONTEND_`, `BACKEND_`, `QA_`:
 
@@ -350,6 +380,9 @@ appbuilder/
 │   └── static/
 │       └── index.html  # single-file UI: per-agent tabs, file tree, metrics bar
 ├── benchmark/          # cost & consistency harness (tasks.yaml, run_benchmark.py)
+├── Dockerfile          # application image (server + orchestration)
+├── Dockerfile.runner   # minimal image agent commands execute in
+├── docker-compose.yml  # both images, shared workspace volume
 ├── tests/              # guardrail tests — no API key required
 ├── workspace/          # sandbox — generated apps live here (gitignored)
 ├── runs/               # per-request metrics records (gitignored)
@@ -363,37 +396,54 @@ appbuilder/
 
 Stated plainly, because these matter more than the feature list.
 
-**`run_command` is arbitrary shell execution.** The `working_dir` argument is path-jailed,
-but the command string itself is not sandboxed — an agent can reach outside the workspace.
-**This tool is intended for trusted local use only.** Do not expose the server to a
-network or run it against untrusted prompts without containerizing the workspace first.
+**Agent shell commands are containerized, and the server is not.** `run_command` executes
+in a one-shot runner container with only the session workspace mounted, no outbound
+network, a memory cap, and a non-root user — so a command cannot read the host filesystem
+or phone home. But launching those containers requires the Docker socket, which is a
+host-level privilege granted to the *server* process. Isolation protects you from what the
+agents do; it does not make the server itself safe to expose publicly.
 
-**In-process state.** Conversation checkpoints (`MemorySaver`), specialist histories, and
-delegation budgets live in process memory. Restarting the server loses all sessions.
+**`ALLOW_UNSANDBOXED_COMMANDS=true` removes that boundary entirely.** It exists for local
+development without Docker, and it restores the original posture: arbitrary shell
+execution as your user, path-jailed `working_dir` but unjailed command string. Trusted
+local use only.
 
-**Single shared workspace.** All sessions write to the same directory, so concurrent
-sessions building apps with the same name will collide.
+**Installing packages requires opening the network.** The runner defaults to
+`RUNNER_NETWORK=none`, which keeps loopback (so QA smoke tests still work) but blocks
+outbound access — `npm install` fails until you set `RUNNER_NETWORK=bridge`. That is the
+intended tradeoff, not an oversight.
 
-**Unbounded specialist history.** Specialist context accumulates across tasks within a
-session with no trimming or summarization, so cost grows over long sessions.
+**In-process state.** Conversation checkpoints (`MemorySaver`), specialist histories,
+delegation budgets, and live metrics all live in process memory. Restarting the server
+loses every session; only the JSONL records under `runs/` survive.
 
-**No retry on transient provider errors.** A single failed LLM call aborts the current
-specialist run.
+**History trimming is a window, not a summary.** Old messages past
+`MAX_HISTORY_MESSAGES` are dropped, not compressed, so a very long session forgets its
+early context rather than paying for it.
 
-**No cost or token instrumentation yet.** Per-agent model routing makes cost optimization
-*possible*; it is not yet *measured*.
+**Cost estimates are only as good as the price table.** A model absent from
+`MODEL_PRICING` still has its tokens counted but contributes `$0.00`, and providers that
+omit usage metadata contribute zero tokens.
+
+**Language detection can be wrong on borderline input.** Detection is deterministic and
+sticky with a confidence floor, but a confident wrong guess (short mixed-language text
+above the threshold) will switch the session until the next confident message.
 
 ---
 
 ## Roadmap
 
-- [ ] Token/cost/latency instrumentation per agent, persisted per run
-- [ ] Containerized workspace execution
-- [ ] Per-session workspace isolation
-- [ ] Retry with exponential backoff on LLM calls
-- [ ] History trimming / summarization for long sessions
-- [ ] Persistent checkpointer (SQLite/Postgres)
-- [ ] Benchmark harness: N identical tasks, measured variance and cost
+- [x] Per-session workspace isolation
+- [x] Retry with exponential backoff on LLM calls
+- [x] History trimming for long sessions
+- [x] Test suite for the guardrails, plus CI on 3.10–3.12
+- [x] Token/cost/latency instrumentation per agent, persisted per run
+- [x] Benchmark harness: N identical tasks, measured variance and cost
+- [x] Containerized command execution
+- [x] Response language mirrors the user's
+- [ ] Persistent checkpointer (SQLite/Postgres) so sessions survive a restart
+- [ ] History summarization instead of a plain window
+- [ ] Rootless/gVisor runner so the server no longer needs the Docker socket
 
 ---
 

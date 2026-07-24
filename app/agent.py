@@ -18,6 +18,7 @@ import random
 import re
 import subprocess
 import time
+import uuid
 from typing import Annotated
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -151,45 +152,125 @@ def list_files(path: str = ".") -> str:
         return failed(f"could not list files: {e}")
 
 
+# ==========================================
+# Shell execution sandbox
+# ==========================================
+# Commands run inside a disposable container by default: only the session workspace is
+# mounted, so a command cannot read the host filesystem, and networking is off unless
+# explicitly enabled. ALLOW_UNSANDBOXED_COMMANDS=true restores direct host execution for
+# local development — that is the posture the README documents as trusted-only.
+SANDBOX_COMMANDS = os.environ.get(
+    "ALLOW_UNSANDBOXED_COMMANDS", ""
+).strip().lower() not in ("1", "true", "yes")
+DOCKER_BIN = os.environ.get("DOCKER_BIN", "docker")
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "appbuilder-runner:latest")
+# 'none' still gives the container its own loopback, so QA smoke tests against
+# localhost work while outbound access does not. Set to 'bridge' when a task genuinely
+# needs to install packages.
+RUNNER_NETWORK = os.environ.get("RUNNER_NETWORK", "none")
+RUNNER_MEMORY = os.environ.get("RUNNER_MEMORY", "512m")
+RUNNER_CPUS = os.environ.get("RUNNER_CPUS", "2")
+RUNNER_USER = os.environ.get("RUNNER_USER", "1000:1000")
+# Set when the server itself runs in a container: the runner then reuses the server's
+# mounts instead of bind-mounting a host path the server cannot name.
+RUNNER_VOLUMES_FROM = os.environ.get("RUNNER_VOLUMES_FROM", "").strip()
+
+
+def _runner_argv(container_name: str, command: str, cwd: str) -> list[str]:
+    """Build the `docker run` argv that executes one agent command in isolation."""
+    session_root = os.path.abspath(_SESSION_ROOT.get())
+    argv = [
+        DOCKER_BIN, "run", "--rm", "--name", container_name,
+        "--network", RUNNER_NETWORK,
+        "--memory", RUNNER_MEMORY,
+        "--cpus", RUNNER_CPUS,
+        "--pids-limit", "512",
+        "--user", RUNNER_USER,
+        "--security-opt", "no-new-privileges",
+    ]
+    if RUNNER_VOLUMES_FROM:
+        # Same mount, same absolute path, so cwd needs no translation.
+        argv += ["--volumes-from", RUNNER_VOLUMES_FROM, "-w", cwd]
+    else:
+        relative = os.path.relpath(cwd, session_root).replace("\\", "/")
+        workdir = "/workspace" if relative == "." else f"/workspace/{relative}"
+        argv += ["-v", f"{session_root}:/workspace", "-w", workdir]
+    return argv + [RUNNER_IMAGE, "sh", "-lc", command]
+
+
+def _kill_process_group(proc) -> None:
+    """SIGKILL the command's whole process group; a no-op where that is unsupported."""
+    if not hasattr(os, "killpg"):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
+    import signal
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _kill_container(name: str) -> None:
+    try:
+        subprocess.run(
+            [DOCKER_BIN, "kill", name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20,
+        )
+    except Exception:
+        pass
+
+
 @tool
 def run_command(command: str, working_dir: str = ".", timeout_seconds: int = 120) -> str:
     """Menjalankan perintah shell di dalam workspace, misal 'npm install', 'npm run build',
     'node --check', atau smoke test. working_dir relatif terhadap workspace.
     timeout_seconds default 120, maksimal 300 (pakai nilai besar hanya untuk install/build lama).
 
-    GARANSI SISTEM: seluruh process group DIBUNUH PAKSA saat timeout ATAU saat perintah
-    selesai — proses background tidak pernah bocor. Untuk smoke test server, jalankan
-    server di background dengan output di-redirect ke file, tunggu, lalu curl — semua
-    dalam SATU perintah. Contoh:
+    GARANSI SISTEM: perintah berjalan di dalam container terisolasi yang hanya bisa
+    melihat workspace sesi ini, dan seluruh process group DIBUNUH PAKSA saat timeout
+    ATAU saat perintah selesai — proses background tidak pernah bocor. Untuk smoke test
+    server, jalankan server di background dengan output di-redirect ke file, tunggu,
+    lalu curl — semua dalam SATU perintah. Contoh:
     'node backend/server.js > smoke.log 2>&1 & sleep 2; curl -s http://localhost:3000/api/health'
+    Akses jaringan keluar dimatikan secara default (localhost tetap bisa).
     """
-    import signal
+    container_name = None
     try:
         cwd = _safe_path(working_dir)
         timeout_seconds = max(5, min(int(timeout_seconds), 300))
         # start_new_session=True: perintah + semua anaknya masuk satu process group
         # baru, sehingga bisa dibunuh serentak (termasuk server yang di-background).
-        proc = subprocess.Popen(
-            command, shell=True, cwd=cwd,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True,
-        )
+        # Ini tetap dipertahankan sebagai lapis kedua di atas isolasi container.
+        if SANDBOX_COMMANDS:
+            container_name = f"appbuilder-run-{uuid.uuid4().hex[:12]}"
+            proc = subprocess.Popen(
+                _runner_argv(container_name, command, cwd),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
+            )
+        else:
+            proc = subprocess.Popen(
+                command, shell=True, cwd=cwd,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
+            )
         timed_out = False
         try:
             stdout, stderr = proc.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            if container_name:
+                _kill_container(container_name)
+            _kill_process_group(proc)
             stdout, stderr = proc.communicate()
         finally:
             # Sapu bersih sisa proses background walau perintah utama selesai normal.
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            if container_name:
+                _kill_container(container_name)
+            _kill_process_group(proc)
 
         out = (stdout or "") + ("\n" + stderr if stderr else "")
         if len(out) > 6000:
@@ -200,6 +281,15 @@ def run_command(command: str, working_dir: str = ".", timeout_seconds: int = 120
         if proc.returncode == 0:
             return ok(f"command finished (exit code 0)\n{out.strip()}")
         return failed(f"command exited with code {proc.returncode}\n{out.strip()}")
+    except FileNotFoundError as e:
+        if SANDBOX_COMMANDS:
+            return failed(
+                f"the command sandbox needs Docker but '{DOCKER_BIN}' was not found. "
+                f"Start the stack with docker compose, or set "
+                f"ALLOW_UNSANDBOXED_COMMANDS=true to run commands directly on the host "
+                f"(trusted local use only). Original error: {e}"
+            )
+        return failed(f"could not run command: {e}")
     except Exception as e:
         return failed(f"could not run command: {e}")
 
