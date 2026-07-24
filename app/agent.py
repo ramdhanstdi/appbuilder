@@ -95,8 +95,8 @@ def _safe_path(path: str) -> str:
 # ==========================================
 @tool
 def write_code_file(file_path: str, content: str) -> str:
-    """Membuat atau menimpa satu file. Folder dibuat otomatis jika belum ada.
-    file_path bersifat RELATIF terhadap workspace, contoh: 'toko-online/src/App.jsx'.
+    """Create or overwrite a single file. Missing folders are created automatically.
+    file_path is RELATIVE to the workspace, e.g. 'online-store/src/App.jsx'.
     """
     try:
         full = _safe_path(file_path)
@@ -112,7 +112,7 @@ def write_code_file(file_path: str, content: str) -> str:
 
 @tool
 def read_code_file(file_path: str) -> str:
-    """Membaca isi sebuah file di dalam workspace (path relatif terhadap workspace)."""
+    """Read the contents of a file in the workspace (path relative to the workspace)."""
     try:
         full = _safe_path(file_path)
         with open(full, encoding="utf-8") as f:
@@ -126,7 +126,7 @@ def read_code_file(file_path: str) -> str:
 
 @tool
 def list_files(path: str = ".") -> str:
-    """Melihat struktur file/folder di dalam workspace (path relatif, default root workspace)."""
+    """List the file/folder structure in the workspace (relative path, defaults to the root)."""
     try:
         full = _safe_path(path)
         if not os.path.exists(full):
@@ -225,17 +225,18 @@ def _kill_container(name: str) -> None:
 
 @tool
 def run_command(command: str, working_dir: str = ".", timeout_seconds: int = 120) -> str:
-    """Menjalankan perintah shell di dalam workspace, misal 'npm install', 'npm run build',
-    'node --check', atau smoke test. working_dir relatif terhadap workspace.
-    timeout_seconds default 120, maksimal 300 (pakai nilai besar hanya untuk install/build lama).
+    """Run a shell command inside the workspace, e.g. 'npm install', 'npm run build',
+    'node --check', or a smoke test. working_dir is relative to the workspace.
+    timeout_seconds defaults to 120, maximum 300 (use large values only for slow
+    installs or builds).
 
-    GARANSI SISTEM: perintah berjalan di dalam container terisolasi yang hanya bisa
-    melihat workspace sesi ini, dan seluruh process group DIBUNUH PAKSA saat timeout
-    ATAU saat perintah selesai — proses background tidak pernah bocor. Untuk smoke test
-    server, jalankan server di background dengan output di-redirect ke file, tunggu,
-    lalu curl — semua dalam SATU perintah. Contoh:
+    SYSTEM GUARANTEE: the command runs inside an isolated container that can only see
+    this session's workspace, and its whole process group is FORCE-KILLED on timeout
+    AND when the command finishes — background processes never leak. To smoke-test a
+    server, start it in the background with output redirected to a file, wait, then
+    curl, all in ONE command. Example:
     'node backend/server.js > smoke.log 2>&1 & sleep 2; curl -s http://localhost:3000/api/health'
-    Akses jaringan keluar dimatikan secara default (localhost tetap bisa).
+    Outbound network access is disabled by default (localhost still works).
     """
     container_name = None
     try:
@@ -296,14 +297,14 @@ def run_command(command: str, working_dir: str = ".", timeout_seconds: int = 120
 
 @tool
 async def discuss_with(agent: str, message: str) -> str:
-    """Berdiskusi LANGSUNG dengan agent spesialis lain dan menunggu balasannya.
-    agent: 'ba' | 'frontend' | 'backend' | 'qa' (tidak boleh dirimu sendiri).
-    Gunakan untuk menyelaraskan pekerjaan antar spesialis, misal kontrak API antara
-    frontend & backend, atau QA memberitahu bug langsung ke engineer terkait.
-    message: pesan yang jelas dan spesifik (sebut file/endpoint yang dibahas).
+    """Talk DIRECTLY to another specialist agent and wait for their reply.
+    agent: 'ba' | 'frontend' | 'backend' | 'qa' (never yourself).
+    Use it to align work between specialists, e.g. the API contract between frontend and
+    backend, or QA reporting a bug straight to the engineer who owns the code.
+    message: a clear, specific message (name the file or endpoint being discussed).
     """
-    # Catatan: tool ini tidak pernah dieksekusi lewat sini — pemanggilannya
-    # ditangani khusus di _run_specialist agar identitas pengirim diketahui.
+    # Note: this body never runs — discuss_with calls are handled specially in
+    # _run_specialist so the sender's identity is known.
     return failed("discuss_with can only be used by specialist agents.")
 
 
@@ -397,7 +398,7 @@ def summarize_args(name: str, args: dict) -> dict:
 
 
 def _text_of(content) -> str:
-    """Normalisasi content message (bisa string atau list of blocks)."""
+    """Normalize message content, which may be a string or a list of blocks."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -519,10 +520,10 @@ def _emit_metrics(writer, thread_id: str) -> None:
 
 
 async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain: tuple) -> str:
-    """Tangani pemanggilan discuss_with oleh seorang spesialis.
+    """Handle a discuss_with call made by a specialist.
 
-    chain = rantai agent yang sedang aktif di tumpukan pemanggilan (tidak termasuk
-    sender). Dipakai untuk menolak siklus: A -> B -> A.
+    chain = the agents currently active on the call stack (excluding the sender). Used to
+    reject cycles: A -> B -> A.
     """
     target = (tc_args.get("agent") or "").strip().lower()
     message = tc_args.get("message") or ""
@@ -545,11 +546,11 @@ async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain:
 async def _run_specialist(
     agent_key: str, content: str, thread_id: str, *, source: str = "pm", chain: tuple = ()
 ) -> str:
-    """Jalankan loop kerja satu agent spesialis sampai ia memberikan jawaban akhir.
+    """Run one specialist agent's work loop until it produces a final answer.
 
-    source="pm"  : tugas resmi dari Project Manager (assign_task).
-    source=<key> : pesan diskusi dari spesialis lain (discuss_with).
-    chain        : agent-agent yang menunggu di tumpukan pemanggilan (untuk guard siklus).
+    source="pm"  : an official task from the Project Manager (assign_task).
+    source=<key> : a discussion message from another specialist (discuss_with).
+    chain        : agents waiting on the call stack (used by the cycle guard).
     """
     cfg = AGENTS[agent_key]
     # Di kedalaman maksimal, agent penerima tidak diberi tool discuss_with
@@ -662,10 +663,10 @@ async def _run_specialist(
 # ==========================================
 @tool
 async def assign_task(agent: str, task: str, config: RunnableConfig) -> str:
-    """Mendelegasikan tugas ke satu agent spesialis dan MENUNGGU laporan akhirnya.
-    agent harus salah satu dari: 'ba' (Business Analyst), 'frontend' (Frontend Engineer),
+    """Delegate a task to one specialist agent and WAIT for their final report.
+    agent must be one of: 'ba' (Business Analyst), 'frontend' (Frontend Engineer),
     'backend' (Backend Engineer), 'qa' (Quality Assurance).
-    task: deskripsi tugas yang jelas dan lengkap (sebut folder app & file spec bila ada).
+    task: a clear, complete task description (name the app folder and the spec files).
     """
     if agent not in SPECIALISTS:
         return failed(f"unknown agent '{agent}'. Choose one of: {', '.join(SPECIALISTS)}.")
@@ -684,9 +685,9 @@ async def assign_task(agent: str, task: str, config: RunnableConfig) -> str:
 
 @tool
 def ask_user(question: str) -> str:
-    """Bertanya kepada user dan MENUNGGU jawabannya. Eksekusi berhenti sampai user menjawab.
-    Gunakan HANYA jika keputusan benar-benar butuh input user. Panggil tool ini SENDIRIAN,
-    jangan bersamaan dengan tool lain.
+    """Ask the user a question and WAIT for the answer. Execution pauses until they reply.
+    Use this ONLY when a decision genuinely needs user input. Call this tool ALONE, never
+    alongside other tool calls.
     """
     answer = interrupt(question)
     return str(answer)
