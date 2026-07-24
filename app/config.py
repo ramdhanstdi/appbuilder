@@ -102,7 +102,7 @@ Aturan umum:
   2. SELALU BAHASA INGGRIS: kode — nama variabel, nama fungsi, komentar, string log.
   3. SELALU BAHASA INGGRIS: token protokol DAN SEMUA NAMA FILE/FOLDER. Path selalu
      'docs/SPEC.md', 'docs/API_CONTRACT.md', 'frontend/', 'backend/' — nama file yang
-     diterjemahkan akan GAGAL pemeriksaan zona kepemilikan dan kamu tidak bisa menulis
+     diterjemahkan akan DITOLAK pemeriksaan zona kepemilikan dan kamu tidak bisa menulis
      spesifikasimu sendiri.
 - Perintah shell lewat run_command otomatis dihentikan paksa saat timeout, dan semua
   proses background ikut dibunuh saat perintah selesai — jangan andalkan proses
