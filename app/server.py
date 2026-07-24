@@ -77,7 +77,9 @@ async def files(thread_id: str | None = None):
     if not os.path.isdir(root_dir):
         return JSONResponse(tree)
     for root, dirs, filenames in os.walk(root_dir):
-        dirs[:] = sorted(d for d in dirs if d not in ("node_modules", ".git", "dist", "__pycache__"))
+        dirs[:] = sorted(
+            d for d in dirs if d not in ("node_modules", ".git", "dist", "__pycache__")
+        )
         rel = os.path.relpath(root, root_dir)
         depth = 0 if rel == "." else rel.count(os.sep) + 1
         if depth > 5:

@@ -15,10 +15,9 @@ import asyncio
 import contextvars
 import os
 import random
+import re
 import subprocess
 from typing import Annotated
-
-from typing_extensions import TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -30,6 +29,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
+from typing_extensions import TypedDict
 
 from app.config import AGENTS, SPECIALISTS
 from app.language import (
@@ -64,11 +64,24 @@ def set_session_workspace(thread_id: str) -> str:
     return root
 
 
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
 def _safe_path(path: str) -> str:
-    """Kunci semua operasi file agar tidak bisa keluar dari root workspace sesi ini."""
-    root = _SESSION_ROOT.get()
-    cleaned = path.lstrip("/\\")
-    full = os.path.abspath(os.path.join(root, cleaned))
+    """Jail every file operation inside this session's workspace root.
+
+    Separators are normalized before the check so traversal is rejected identically on
+    POSIX and Windows: a backslash is an ordinary filename character on POSIX, which
+    would otherwise let '..\\..\\etc' through as a literal name. A leading '/' means
+    workspace-relative, not filesystem-absolute; drive-qualified and UNC paths are
+    rejected outright since they can only be attempts to leave the sandbox.
+    """
+    root = os.path.abspath(_SESSION_ROOT.get())
+    normalized = (path or "").replace("\\", "/")
+    if _DRIVE_RE.match(normalized) or normalized.startswith("//"):
+        raise ValueError(f"access denied: path '{path}' is outside the workspace.")
+    segments = [p for p in normalized.split("/") if p]
+    full = os.path.abspath(os.path.join(root, *segments))
     if not (full == root or full.startswith(root + os.sep)):
         raise ValueError(f"access denied: path '{path}' is outside the workspace.")
     return full
@@ -99,7 +112,7 @@ def read_code_file(file_path: str) -> str:
     """Membaca isi sebuah file di dalam workspace (path relatif terhadap workspace)."""
     try:
         full = _safe_path(file_path)
-        with open(full, "r", encoding="utf-8") as f:
+        with open(full, encoding="utf-8") as f:
             content = f.read()
         if len(content) > 12000:
             content = content[:12000] + "\n... [truncated]"
@@ -479,7 +492,9 @@ async def _run_specialist(
             if tc["name"] == "discuss_with":
                 result = await _run_discussion(agent_key, tc.get("args") or {}, thread_id, chain)
                 succeeded = not is_failure(result)
-                history.append(ToolMessage(content=result[:8000], tool_call_id=tc["id"], name=tc["name"]))
+                history.append(ToolMessage(
+                    content=result[:8000], tool_call_id=tc["id"], name=tc["name"]
+                ))
                 # Untuk UI, buang baris prefix "Balasan dari ..." karena label bubble
                 # sudah menyebutkan pengirimnya.
                 shown = result.split("\n", 1)[1] if succeeded and "\n" in result else result
@@ -509,7 +524,9 @@ async def _run_specialist(
                 except Exception as e:
                     result = failed(str(e))
             result = str(result)
-            history.append(ToolMessage(content=result[:8000], tool_call_id=tc["id"], name=tc["name"]))
+            history.append(ToolMessage(
+                content=result[:8000], tool_call_id=tc["id"], name=tc["name"]
+            ))
             writer({
                 "agent": agent_key, "type": "tool_result",
                 "name": tc["name"],

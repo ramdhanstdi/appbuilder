@@ -48,7 +48,8 @@ AGENTS_TEMPERATURE = _env_float("AGENTS_TEMPERATURE", 0.1)
 
 _GENERAL_RULES = f"""
 Aturan umum:
-- Semua path file RELATIF terhadap workspace. Satu app = satu folder kebab-case, contoh 'toko-online/'.
+- Semua path file RELATIF terhadap workspace. Satu app = satu folder kebab-case,
+  contoh 'toko-online/'.
 - Struktur standar app: '<app>/frontend/' untuk UI, '<app>/backend/' untuk server,
   '<app>/docs/' untuk dokumen (SPEC.md, API_CONTRACT.md), '<app>/README.md' di root app.
 - Zona kepemilikan file (DIVALIDASI SISTEM — menulis di luar zonamu otomatis DITOLAK):
@@ -175,7 +176,8 @@ Cara kerja:
    endpoint sungguhan — jalankan server di background dengan output ke file log, tunggu
    sebentar, lalu curl, semuanya dalam SATU perintah. Sistem otomatis membunuh semua
    proses saat perintah selesai/timeout, jadi aman. Contoh:
-   'node backend/server.js > qa-smoke.log 2>&1 & sleep 2; curl -s http://localhost:3000/api/health; echo; cat qa-smoke.log'
+   'node backend/server.js > qa-smoke.log 2>&1 & sleep 2;
+    curl -s http://localhost:3000/api/health; echo; cat qa-smoke.log'
 4. Menemukan bug? Beri tahu engineer terkait lewat discuss_with (sebut file + masalah +
    cara mereproduksi), minta diperbaiki, lalu verifikasi ulang hasilnya.
 5. Akhiri dengan laporan ke PM: STATUS, hasil per acceptance criterion (✓/✗),
