@@ -290,6 +290,18 @@ cycle/depth limits, the delegation budget, history trimming, session cleanup, an
 handling. Every LLM call is mocked: it needs no API key and no live endpoint, and runs in
 about a second. CI runs the same two commands on Python 3.10, 3.11, and 3.12.
 
+### Benchmarks
+
+```bash
+python -m benchmark.run_benchmark --runs 3
+python -m benchmark.run_benchmark --runs 3 --config benchmark/configs/cheap-qa.yaml
+```
+
+Runs the same build tasks N times against the real graph and prints cost, tokens,
+delegations, QA repair rounds, and the standard deviation across runs — so two per-agent
+routing strategies can be compared on evidence rather than intuition. Unlike the test
+suite this makes real LLM calls and costs real money. See [benchmark/README.md](benchmark/README.md).
+
 ---
 
 ## Configuration
@@ -305,6 +317,8 @@ environment variables:
 | `AGENTS_TEMPERATURE` | Sampling temperature | `0.1` |
 | `PM_WORKSPACE` | Workspace root directory | `./workspace` |
 | `MAX_ASSIGN_TASKS` | Delegation budget per user request | `12` |
+| `MODEL_PRICING_JSON` | Price list override for cost estimation (JSON) | built-in table |
+| `RUNS_DIR` | Where per-request metrics records are written | `./runs` |
 | `MAX_HISTORY_MESSAGES` | Messages kept in a specialist's history before trimming | `60` |
 | `DEFAULT_RESPONSE_LANGUAGE` | Response language before detection (ISO 639-1) | `id` |
 
@@ -335,6 +349,7 @@ appbuilder/
 │   ├── server.py       # FastAPI + WebSocket streaming
 │   └── static/
 │       └── index.html  # single-file UI: per-agent tabs, file tree, metrics bar
+├── benchmark/          # cost & consistency harness (tasks.yaml, run_benchmark.py)
 ├── tests/              # guardrail tests — no API key required
 ├── workspace/          # sandbox — generated apps live here (gitignored)
 ├── runs/               # per-request metrics records (gitignored)

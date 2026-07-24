@@ -1,0 +1,16 @@
+# Example routing strategy: a strong model where architecture decisions are made,
+# a cheap fast model for the mechanical review pass.
+#
+#   python -m benchmark.run_benchmark --runs 3 --config benchmark/configs/cheap-qa.yaml
+#
+# Compare its output against a baseline run with no --config. Every variable here is
+# just an environment override, so anything in .env.example can be set.
+
+name: cheap-qa
+
+env:
+  BA_MODEL: gpt-4o
+  BACKEND_MODEL: gpt-4o
+  FRONTEND_MODEL: gpt-4o
+  QA_MODEL: gpt-4o-mini
+  PM_MODEL: gpt-4o-mini

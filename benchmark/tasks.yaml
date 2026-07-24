@@ -1,0 +1,51 @@
+# Benchmark task definitions.
+#
+# Each task is a build prompt plus the artifacts a successful run must produce.
+# Paths are relative to the run's session workspace; a trailing '/' means "this
+# directory must exist and contain at least one file".
+#
+# `answer` is the canned reply used whenever the PM calls ask_user, so a run never
+# blocks on a human. Make it decisive: an ambiguous answer produces ambiguous runs
+# and inflates variance for reasons that have nothing to do with the routing being
+# measured.
+
+tasks:
+  - id: todo-app
+    prompt: >
+      Build a todo list application in the folder 'todo-app'. It needs an Express
+      backend with a REST API (list, create, toggle done, delete) storing tasks in
+      memory, and a plain HTML/CSS/JS frontend that talks to it. No database, no
+      build step.
+    answer: >
+      Use your best judgment and proceed. Name the app 'todo-app', use Express for
+      the backend and plain HTML/CSS/JS for the frontend, and keep everything in
+      memory.
+    expect:
+      - todo-app/docs/SPEC.md
+      - todo-app/docs/API_CONTRACT.md
+      - todo-app/backend/
+      - todo-app/frontend/
+      - todo-app/README.md
+
+  - id: notes-api
+    prompt: >
+      Build a backend-only notes API in the folder 'notes-api' using Express:
+      create, list, read one, update, and delete a note. Store notes in memory and
+      include a /api/health endpoint. No frontend.
+    answer: >
+      Use your best judgment and proceed. Express, in-memory storage, no frontend.
+    expect:
+      - notes-api/docs/SPEC.md
+      - notes-api/docs/API_CONTRACT.md
+      - notes-api/backend/
+
+  - id: landing-page
+    prompt: >
+      Build a single-page marketing site in the folder 'landing-page' with plain
+      HTML and CSS: a hero section, three feature cards, and a contact form that
+      validates its inputs client-side. No backend.
+    answer: >
+      Use your best judgment and proceed. Plain HTML and CSS, no backend, no build step.
+    expect:
+      - landing-page/docs/SPEC.md
+      - landing-page/frontend/
