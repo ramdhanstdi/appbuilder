@@ -13,6 +13,7 @@ Environment variable per agent tetap bisa dipakai untuk override tanpa mengubah 
   QA_API_BASE, QA_API_KEY, QA_MODEL, QA_TEMPERATURE
 """
 
+import json
 import os
 
 from dotenv import load_dotenv
@@ -44,6 +45,34 @@ AGENTS_API_BASE = os.environ.get("AGENTS_API_BASE", "http://localhost:20128/v1")
 AGENTS_API_KEY = os.environ.get("AGENTS_API_KEY", "")
 AGENTS_MODEL = os.environ.get("AGENTS_MODEL", "")
 AGENTS_TEMPERATURE = _env_float("AGENTS_TEMPERATURE", 0.1)
+
+
+# Optional price list for cost estimation, in USD per 1M tokens. A model that is absent
+# here simply contributes no cost — token counts are still recorded. Extend it for your
+# own provider, or supply the whole map as JSON via MODEL_PRICING_JSON.
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-4.1": {"input": 2.00, "output": 8.00},
+    "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
+    "claude-opus-4-8": {"input": 5.00, "output": 25.00},
+    "claude-sonnet-5": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+}
+
+
+def _load_pricing_override() -> None:
+    raw = os.environ.get("MODEL_PRICING_JSON", "").strip()
+    if not raw:
+        return
+    try:
+        MODEL_PRICING.update(json.loads(raw))
+    except (ValueError, TypeError):
+        # A malformed price list must not stop the server: cost estimation is optional.
+        pass
+
+
+_load_pricing_override()
 
 
 _GENERAL_RULES = f"""

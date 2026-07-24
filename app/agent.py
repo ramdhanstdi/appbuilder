@@ -17,6 +17,7 @@ import os
 import random
 import re
 import subprocess
+import time
 from typing import Annotated
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -39,6 +40,7 @@ from app.language import (
     language_name,
     pin_language,
 )
+from app.metrics import METRICS
 from app.protocol import STATUS_PARTIAL, failed, is_failure, ok
 
 # ==========================================
@@ -241,6 +243,7 @@ def cleanup_session(thread_id: str) -> None:
     _SPECIALIST_HISTORY.pop(thread_id, None)
     _ASSIGN_BUDGET.pop(thread_id, None)
     forget_session(thread_id)
+    METRICS.drop(thread_id)
 
 
 # Zona kepemilikan file per agent, dicek DI LEVEL TOOL (bukan sekadar prompt).
@@ -377,19 +380,24 @@ _RETRY_BASE_DELAY = float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0"))
 
 
 async def _invoke_with_retry(llm, messages, *, attempts: int = 3, agent_key: str = "pm",
-                             writer=None):
+                             writer=None, thread_id: str = "default", model: str = ""):
     """Invoke an LLM, retrying transient failures with exponential backoff + jitter.
 
     Retries on any exception up to `attempts` times (delays 1s, 2s, 4s * base plus jitter),
     emitting a `retry` stream event before each wait. Re-raises after the final attempt so
     the caller can surface a real error rather than silently degrading.
+
+    Every attempt is instrumented: tokens, cost, latency, and retry count land in METRICS
+    under (thread_id, agent_key).
     """
     for attempt in range(attempts):
+        started = time.monotonic()
         try:
-            return await llm.ainvoke(messages)
+            response = await llm.ainvoke(messages)
         except Exception as e:
             if attempt == attempts - 1:
                 raise
+            METRICS.record_retry(thread_id, agent_key)
             delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, _RETRY_BASE_DELAY)
             if writer is not None:
                 try:
@@ -401,6 +409,23 @@ async def _invoke_with_retry(llm, messages, *, attempts: int = 3, agent_key: str
                 except Exception:
                     pass
             await asyncio.sleep(delay)
+            continue
+
+        METRICS.record_llm_call(
+            thread_id, agent_key, model, response, time.monotonic() - started
+        )
+        _emit_metrics(writer, thread_id)
+        return response
+
+
+def _emit_metrics(writer, thread_id: str) -> None:
+    """Push running session totals to the UI. Never allowed to break a run."""
+    if writer is None:
+        return
+    try:
+        writer({"type": "metrics", "totals": METRICS.totals(thread_id)})
+    except Exception:
+        pass
 
 
 async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain: tuple) -> str:
@@ -471,7 +496,10 @@ async def _run_specialist(
                 content=cfg["prompt"] + language_directive(effective_language(thread_id))
             )
         ] + history
-        response = await _invoke_with_retry(llm, messages, agent_key=agent_key, writer=writer)
+        response = await _invoke_with_retry(
+            llm, messages, agent_key=agent_key, writer=writer,
+            thread_id=thread_id, model=cfg["model"],
+        )
         history.append(response)
 
         text = _text_of(response.content)
@@ -484,6 +512,7 @@ async def _run_specialist(
             return text or f"STATUS: {STATUS_PARTIAL}\n(finished without a report)"
 
         for tc in tool_calls:
+            METRICS.record_tool_call(thread_id, agent_key)
             writer({
                 "agent": agent_key, "type": "tool_call",
                 "detail": summarize_args(tc["name"], tc.get("args") or {}),
@@ -611,7 +640,12 @@ async def project_manager(state: State, config: RunnableConfig):
         writer = get_stream_writer()
     except Exception:
         writer = None
-    response = await _invoke_with_retry(_pm_llm, messages, agent_key="pm", writer=writer)
+    response = await _invoke_with_retry(
+        _pm_llm, messages, agent_key="pm", writer=writer,
+        thread_id=thread_id, model=AGENTS["pm"]["model"],
+    )
+    for _ in getattr(response, "tool_calls", None) or []:
+        METRICS.record_tool_call(thread_id, "pm")
     return {"messages": [response]}
 
 

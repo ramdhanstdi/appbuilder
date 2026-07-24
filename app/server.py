@@ -32,6 +32,7 @@ from app.agent import (
 )
 from app.config import AGENTS
 from app.language import resolve_session_language, start_session
+from app.metrics import METRICS
 from app.protocol import is_failure
 
 app = FastAPI(title="App Builder — Tim Multi-Agent")
@@ -98,6 +99,12 @@ async def files(thread_id: str | None = None):
     return JSONResponse(tree)
 
 
+@app.get("/api/metrics/{thread_id}")
+async def metrics(thread_id: str):
+    """Token, cost, and latency summary for a session, broken down per agent."""
+    return JSONResponse(METRICS.summary(thread_id))
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -134,6 +141,7 @@ async def ws_endpoint(ws: WebSocket):
                 graph_input = {"messages": [HumanMessage(content=text)]}
                 # Permintaan baru dari user = jatah delegasi PM di-reset.
                 reset_task_budget(thread_id)
+                METRICS.start_request(thread_id, text)
 
             await ws.send_json({"type": "working"})
 
@@ -186,6 +194,11 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_json({"agent": "pm", "type": "error", "content": str(e)})
 
             if not waiting_for_answer:
+                # One JSON Lines record per completed user request, under runs/.
+                METRICS.finish_request(thread_id)
+                await ws.send_json({
+                    "type": "metrics", "totals": METRICS.totals(thread_id), "final": True,
+                })
                 await ws.send_json({"type": "done"})
     except WebSocketDisconnect:
         pass

@@ -179,12 +179,23 @@ owned exclusively by the backend agent. If the implementation must diverge, the 
 updates the file first, then notifies the frontend — the frontend can read it but never
 write it.
 
-### 4. Per-agent model routing
+### 4. Per-agent model routing — and the measurement to justify it
 
 Every agent carries its own `api_base`, `api_key`, `model`, and `temperature`. Any agent
 can run on a different provider entirely. This makes cost engineering possible: an
 expensive reasoning model for the BA where architecture decisions are made, a cheap fast
 model for mechanical review passes, without touching a line of orchestration code.
+
+Routing without measurement is just a knob, so `app/metrics.py` records what each agent
+actually consumed — prompt and completion tokens, LLM calls, tool calls, retries,
+cumulative latency, and estimated cost from the `MODEL_PRICING` table in `app/config.py`.
+Totals stream to a footer bar in the UI while the run is in flight, one JSON Lines record
+per completed user request lands in `runs/<thread_id>.jsonl`, and
+`GET /api/metrics/{thread_id}` returns the live per-agent breakdown.
+
+Usage metadata is read from `usage_metadata` with a fallback to `response_metadata`;
+a provider that reports neither contributes zero tokens rather than failing the run.
+`benchmark/` (below) turns those records into a comparison between routing strategies.
 
 ### 5. Human-in-the-loop uses real checkpointing
 
@@ -320,10 +331,13 @@ appbuilder/
 │   ├── config.py       # per-agent config + system prompts
 │   ├── protocol.py     # OK/FAILED + DONE/PARTIAL/BLOCKED tokens (single source of truth)
 │   ├── language.py     # response-language detection, stickiness, prompt directive
+│   ├── metrics.py      # per-agent tokens, cost, latency; JSONL run records
 │   ├── server.py       # FastAPI + WebSocket streaming
 │   └── static/
-│       └── index.html  # single-file UI: per-agent tabs, file tree
+│       └── index.html  # single-file UI: per-agent tabs, file tree, metrics bar
+├── tests/              # guardrail tests — no API key required
 ├── workspace/          # sandbox — generated apps live here (gitignored)
+├── runs/               # per-request metrics records (gitignored)
 ├── requirements.txt
 └── .env.example
 ```
