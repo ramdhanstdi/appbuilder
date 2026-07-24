@@ -17,6 +17,14 @@ import os
 
 from dotenv import load_dotenv
 
+from app.protocol import (
+    RESULT_FAILED,
+    RESULT_OK,
+    STATUS_BLOCKED,
+    STATUS_DONE,
+    STATUS_PARTIAL,
+)
+
 # Load variables from a local .env before reading any configuration. This keeps
 # credentials out of the source tree — see .env.example for the full list.
 load_dotenv()
@@ -38,7 +46,7 @@ AGENTS_MODEL = os.environ.get("AGENTS_MODEL", "")
 AGENTS_TEMPERATURE = _env_float("AGENTS_TEMPERATURE", 0.1)
 
 
-_GENERAL_RULES = """
+_GENERAL_RULES = f"""
 Aturan umum:
 - Semua path file RELATIF terhadap workspace. Satu app = satu folder kebab-case, contoh 'toko-online/'.
 - Struktur standar app: '<app>/frontend/' untuk UI, '<app>/backend/' untuk server,
@@ -50,9 +58,13 @@ Aturan umum:
   * QA       : tidak menulis file sama sekali (reviewer murni)
   Butuh perubahan di luar zonamu? Minta owner-nya lewat discuss_with.
 - Setiap laporan akhir spesialis ke PM WAJIB diawali baris pertama:
-  'STATUS: SELESAI' atau 'STATUS: PARSIAL' atau 'STATUS: BLOKIR'
-  lalu: file yang dibuat/diubah, keputusan penting yang diambil, dan (jika PARSIAL/BLOKIR)
-  alasan + apa yang kamu butuhkan untuk lanjut.
+  'STATUS: {STATUS_DONE}' atau 'STATUS: {STATUS_PARTIAL}' atau 'STATUS: {STATUS_BLOCKED}'
+  lalu: file yang dibuat/diubah, keputusan penting yang diambil, dan (jika {STATUS_PARTIAL}/
+  {STATUS_BLOCKED}) alasan + apa yang kamu butuhkan untuk lanjut.
+- TOKEN PROTOKOL SELALU BAHASA INGGRIS, apa pun bahasa jawabanmu: nilai 'STATUS:'
+  ({STATUS_DONE} / {STATUS_PARTIAL} / {STATUS_BLOCKED}) dan prefiks hasil tool
+  ('{RESULT_OK}:' / '{RESULT_FAILED}:'). Hanya kalimat SETELAH titik dua yang boleh
+  mengikuti bahasa jawaban. Menerjemahkan token ini akan merusak sistem.
 - Bahasa: laporan & dokumen dalam Bahasa Indonesia. KODE (nama variabel, fungsi,
   komentar, string teknis) dalam Bahasa Inggris.
 - Perintah shell lewat run_command otomatis dihentikan paksa saat timeout, dan semua
@@ -88,7 +100,8 @@ Alur kerja standar untuk membangun app:
 Untuk permintaan kecil/sederhana kamu boleh mempersingkat alur (misal langsung ke satu
 engineer tanpa BA/QA). Jika laporan spesialis berisi pertanyaan yang hanya bisa dijawab
 user, teruskan lewat ask_user. Perhatikan baris STATUS di setiap laporan spesialis:
-PARSIAL/BLOKIR artinya pekerjaan BELUM selesai — jangan lapor sukses ke user.
+{STATUS_PARTIAL}/{STATUS_BLOCKED} artinya pekerjaan BELUM selesai — jangan lapor sukses
+ke user. Hanya {STATUS_DONE} yang berarti pekerjaan itu benar-benar rampung.
 Sistem membatasi jumlah assign_task per permintaan user; gunakan delegasi dengan efisien.
 {_GENERAL_RULES}"""
 

@@ -31,6 +31,7 @@ from app.agent import (
     summarize_args,
 )
 from app.config import AGENTS
+from app.protocol import is_failure
 
 app = FastAPI(title="App Builder — Tim Multi-Agent")
 graph = build_graph()
@@ -163,7 +164,7 @@ async def ws_endpoint(ws: WebSocket):
                                 "agent": "pm",
                                 "type": "report" if name == "assign_task" else "tool_result",
                                 "name": name,
-                                "ok": not result.startswith("GAGAL"),
+                                "ok": not is_failure(result),
                                 "content": result[:1500],
                             })
             except Exception as e:

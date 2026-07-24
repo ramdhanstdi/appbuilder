@@ -32,6 +32,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 
 from app.config import AGENTS, SPECIALISTS
+from app.protocol import STATUS_PARTIAL, failed, is_failure, ok
 
 # ==========================================
 # Workspace: semua app hasil buatan tim masuk ke sini
@@ -62,7 +63,7 @@ def _safe_path(path: str) -> str:
     cleaned = path.lstrip("/\\")
     full = os.path.abspath(os.path.join(root, cleaned))
     if not (full == root or full.startswith(root + os.sep)):
-        raise ValueError(f"Akses ditolak: path '{path}' berada di luar workspace.")
+        raise ValueError(f"access denied: path '{path}' is outside the workspace.")
     return full
 
 
@@ -81,9 +82,9 @@ def write_code_file(file_path: str, content: str) -> str:
             os.makedirs(directory, exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"SUKSES: File tersimpan di {os.path.relpath(full, _SESSION_ROOT.get())}"
+        return ok(f"file saved at {os.path.relpath(full, _SESSION_ROOT.get())}")
     except Exception as e:
-        return f"GAGAL menulis file: {e}"
+        return failed(f"could not write file: {e}")
 
 
 @tool
@@ -94,10 +95,10 @@ def read_code_file(file_path: str) -> str:
         with open(full, "r", encoding="utf-8") as f:
             content = f.read()
         if len(content) > 12000:
-            content = content[:12000] + "\n... [terpotong]"
+            content = content[:12000] + "\n... [truncated]"
         return content
     except Exception as e:
-        return f"GAGAL membaca file: {e}"
+        return failed(f"could not read file: {e}")
 
 
 @tool
@@ -106,7 +107,7 @@ def list_files(path: str = ".") -> str:
     try:
         full = _safe_path(path)
         if not os.path.exists(full):
-            return f"Folder '{path}' belum ada. Workspace masih kosong di lokasi itu."
+            return ok(f"folder '{path}' does not exist yet — nothing here.")
         session_root = _SESSION_ROOT.get()
         lines = []
         for root, dirs, files in os.walk(full):
@@ -121,11 +122,11 @@ def list_files(path: str = ".") -> str:
             for fname in sorted(files):
                 lines.append(f"{indent}  {fname}")
             if len(lines) > 200:
-                lines.append("... [terpotong]")
+                lines.append("... [truncated]")
                 break
         return "\n".join(lines)
     except Exception as e:
-        return f"GAGAL melihat struktur: {e}"
+        return failed(f"could not list files: {e}")
 
 
 @tool
@@ -170,14 +171,15 @@ def run_command(command: str, working_dir: str = ".", timeout_seconds: int = 120
 
         out = (stdout or "") + ("\n" + stderr if stderr else "")
         if len(out) > 6000:
-            out = out[:3000] + "\n... [terpotong] ...\n" + out[-3000:]
+            out = out[:3000] + "\n... [truncated] ...\n" + out[-3000:]
         if timed_out:
-            return (f"GAGAL: perintah melebihi batas {timeout_seconds} detik dan seluruh "
-                    f"prosesnya dihentikan paksa.\nOutput sejauh ini:\n{out.strip()}")
-        status = "SUKSES" if proc.returncode == 0 else f"GAGAL (exit code {proc.returncode})"
-        return f"{status}\n{out.strip()}"
+            return failed(f"command exceeded the {timeout_seconds}s limit and its whole "
+                          f"process group was killed.\nOutput so far:\n{out.strip()}")
+        if proc.returncode == 0:
+            return ok(f"command finished (exit code 0)\n{out.strip()}")
+        return failed(f"command exited with code {proc.returncode}\n{out.strip()}")
     except Exception as e:
-        return f"GAGAL menjalankan perintah: {e}"
+        return failed(f"could not run command: {e}")
 
 
 @tool
@@ -190,7 +192,7 @@ async def discuss_with(agent: str, message: str) -> str:
     """
     # Catatan: tool ini tidak pernah dieksekusi lewat sini — pemanggilannya
     # ditangani khusus di _run_specialist agar identitas pengirim diketahui.
-    return "GAGAL: discuss_with hanya bisa dipakai oleh agent spesialis."
+    return failed("discuss_with can only be used by specialist agents.")
 
 
 BASE_TOOLS = {
@@ -231,15 +233,15 @@ _WRITE_ZONES: dict[str, tuple[str, ...]] = {
 
 
 def _zone_error(agent_key: str, file_path: str) -> str | None:
-    """None jika boleh menulis; pesan GAGAL jika path di luar zona agent."""
+    """None if the write is allowed; a FAILED result if the path is outside the agent's zone."""
     zones = _WRITE_ZONES.get(agent_key)
     if zones is None:
-        return (f"GAGAL: {AGENTS[agent_key]['name']} adalah reviewer murni dan tidak "
-                f"boleh menulis file. Minta engineer pemilik kodenya lewat discuss_with.")
+        return failed(f"{AGENTS[agent_key]['name']} is a pure reviewer and must not write "
+                      f"files. Ask the engineer who owns the code via discuss_with.")
     parts = [p for p in file_path.replace("\\", "/").strip("/").split("/") if p]
     if len(parts) < 2:
-        return ("GAGAL: file harus berada di dalam folder app "
-                "(contoh 'my-app/frontend/index.html'), bukan langsung di root workspace.")
+        return failed("the file must live inside an app folder "
+                      "(e.g. 'my-app/frontend/index.html'), not directly in the workspace root.")
     inner = "/".join(parts[1:])
     for zone in zones:
         if zone.endswith("/") and inner.startswith(zone):
@@ -247,8 +249,8 @@ def _zone_error(agent_key: str, file_path: str) -> str | None:
         if inner == zone:
             return None
     allowed = ", ".join(f"<app>/{z}" for z in zones)
-    return (f"GAGAL: path '{file_path}' di luar zona kepemilikanmu ({allowed}). "
-            f"Minta owner path tersebut mengubahnya lewat discuss_with.")
+    return failed(f"path '{file_path}' is outside your ownership zone ({allowed}). "
+                  f"Ask the owner of that path to change it via discuss_with.")
 
 
 def summarize_args(name: str, args: dict) -> str:
@@ -381,15 +383,15 @@ async def _run_discussion(sender_key: str, tc_args: dict, thread_id: str, chain:
     target = (tc_args.get("agent") or "").strip().lower()
     message = tc_args.get("message") or ""
     if target not in SPECIALISTS:
-        return f"GAGAL: agent '{target}' tidak dikenal. Pilihan: {', '.join(SPECIALISTS)}."
+        return failed(f"unknown agent '{target}'. Choose one of: {', '.join(SPECIALISTS)}.")
     if target == sender_key:
-        return "GAGAL: kamu tidak bisa berdiskusi dengan dirimu sendiri."
+        return failed("you cannot start a discussion with yourself.")
     if target in chain:
-        return (f"GAGAL: {AGENTS[target]['name']} adalah pemanggilmu dalam rantai diskusi "
-                f"ini — jawab langsung di balasanmu, jangan memulai diskusi balik.")
+        return failed(f"{AGENTS[target]['name']} is your caller in this discussion chain — "
+                      f"answer in your reply instead of starting a discussion back.")
     if len(chain) + 1 >= MAX_DISCUSSION_DEPTH:
-        return ("GAGAL: batas kedalaman diskusi tercapai. Selesaikan tugasmu dan "
-                "sampaikan sisanya di laporan ke PM.")
+        return failed("maximum discussion depth reached. Finish your task and raise the "
+                      "rest in your report to the PM.")
     reply = await _run_specialist(
         target, message, thread_id, source=sender_key, chain=chain + (sender_key,)
     )
@@ -442,7 +444,7 @@ async def _run_specialist(
         tool_calls = getattr(response, "tool_calls", None) or []
         if not tool_calls:
             # Tidak ada tool call lagi = jawaban akhir (laporan ke PM / balasan diskusi)
-            return text or "(selesai tanpa laporan)"
+            return text or f"STATUS: {STATUS_PARTIAL}\n(finished without a report)"
 
         for tc in tool_calls:
             writer({
@@ -452,17 +454,17 @@ async def _run_specialist(
 
             if tc["name"] == "discuss_with":
                 result = await _run_discussion(agent_key, tc.get("args") or {}, thread_id, chain)
-                ok = not result.startswith("GAGAL")
+                succeeded = not is_failure(result)
                 history.append(ToolMessage(content=result[:8000], tool_call_id=tc["id"], name=tc["name"]))
                 # Untuk UI, buang baris prefix "Balasan dari ..." karena label bubble
                 # sudah menyebutkan pengirimnya.
-                shown = result.split("\n", 1)[1] if ok and "\n" in result else result
+                shown = result.split("\n", 1)[1] if succeeded and "\n" in result else result
                 writer({
                     "agent": agent_key,
-                    "type": "peer_reply" if ok else "tool_result",
+                    "type": "peer_reply" if succeeded else "tool_result",
                     "name": tc["name"],
                     "from": (tc.get("args") or {}).get("agent", ""),
-                    "ok": ok,
+                    "ok": succeeded,
                     "content": shown[:2000],
                 })
                 continue
@@ -476,22 +478,23 @@ async def _run_specialist(
             if zone_err is not None:
                 result = zone_err
             elif tool_fn is None:
-                result = f"GAGAL: tool '{tc['name']}' tidak tersedia untukmu."
+                result = failed(f"tool '{tc['name']}' is not available to you.")
             else:
                 try:
                     result = await tool_fn.ainvoke(tc.get("args") or {})
                 except Exception as e:
-                    result = f"GAGAL: {e}"
+                    result = failed(str(e))
             result = str(result)
             history.append(ToolMessage(content=result[:8000], tool_call_id=tc["id"], name=tc["name"]))
             writer({
                 "agent": agent_key, "type": "tool_result",
                 "name": tc["name"],
-                "ok": not result.startswith("GAGAL"),
+                "ok": not is_failure(result),
                 "content": result[:400],
             })
 
-    return "PERINGATAN: spesialis berhenti karena mencapai batas iterasi. Hasil mungkin belum lengkap."
+    return (f"STATUS: {STATUS_PARTIAL}\nThe specialist stopped after reaching the step "
+            f"limit ({MAX_SPECIALIST_STEPS}); the work may be incomplete.")
 
 
 # ==========================================
@@ -505,15 +508,15 @@ async def assign_task(agent: str, task: str, config: RunnableConfig) -> str:
     task: deskripsi tugas yang jelas dan lengkap (sebut folder app & file spec bila ada).
     """
     if agent not in SPECIALISTS:
-        return f"GAGAL: agent '{agent}' tidak dikenal. Pilihan: {', '.join(SPECIALISTS)}."
+        return failed(f"unknown agent '{agent}'. Choose one of: {', '.join(SPECIALISTS)}.")
     thread_id = (config.get("configurable") or {}).get("thread_id", "default")
 
     used = _ASSIGN_BUDGET.get(thread_id, 0) + 1
     _ASSIGN_BUDGET[thread_id] = used
     if used > MAX_ASSIGN_TASKS_PER_REQUEST:
-        return (f"GAGAL: batas {MAX_ASSIGN_TASKS_PER_REQUEST} delegasi untuk permintaan "
-                f"ini sudah habis. HENTIKAN delegasi — rangkum status pekerjaan apa adanya "
-                f"ke user (sebutkan apa yang selesai dan apa yang belum).")
+        return failed(f"the budget of {MAX_ASSIGN_TASKS_PER_REQUEST} delegations for this "
+                      f"request is exhausted. STOP delegating — summarize the real state of "
+                      f"the work for the user (what is done and what is not).")
 
     report = await _run_specialist(agent, task, thread_id)
     return f"📤 Laporan dari {AGENTS[agent]['name']}:\n{report}"

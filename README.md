@@ -119,8 +119,11 @@ dangerous, so peer communication is bounded on three axes: depth, cycles, and to
 5. An engineer writes the app `README.md`.
 6. PM reports back to the user.
 
-Every specialist report must begin with `STATUS: SELESAI | PARSIAL | BLOKIR`, so the PM
-cannot mistake partial work for completion.
+Every specialist report must begin with `STATUS: DONE | PARTIAL | BLOCKED`, so the PM
+cannot mistake partial work for completion. Those tokens — and the `OK:` / `FAILED:`
+prefixes on tool results — are **protocol, not prose**: they live in `app/protocol.py`,
+stay English in every response language, and `is_failure()` is the only function allowed
+to inspect a result prefix.
 
 ---
 
