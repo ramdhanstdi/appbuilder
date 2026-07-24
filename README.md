@@ -1,5 +1,7 @@
 # AppBuilder — Multi-Agent Development Team
 
+[![CI](https://github.com/ramdhanstdi/appbuilder/actions/workflows/ci.yml/badge.svg)](https://github.com/ramdhanstdi/appbuilder/actions/workflows/ci.yml)
+
 A LangGraph-based multi-agent system where a Project Manager agent delegates software
 development work to four specialists (Business Analyst, Frontend, Backend, QA) that build
 real applications inside a sandboxed workspace — streamed live to a browser UI.
@@ -262,7 +264,20 @@ python -m app.server
 
 Open <http://localhost:8020>.
 
-Generated applications appear under `workspace/`.
+Generated applications appear under `workspace/<session-id>/`.
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+```
+
+The suite covers the guardrails — the filesystem jail, write-ownership zones, discussion
+cycle/depth limits, the delegation budget, history trimming, session cleanup, and language
+handling. Every LLM call is mocked: it needs no API key and no live endpoint, and runs in
+about a second. CI runs the same two commands on Python 3.10, 3.11, and 3.12.
 
 ---
 
