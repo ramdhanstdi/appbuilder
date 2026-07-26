@@ -124,6 +124,24 @@ def forget_session(thread_id: str) -> None:
     _PINNED.pop(thread_id, None)
 
 
+def language_is_pinned(thread_id: str | None) -> bool:
+    """Whether the session's language was set by an explicit user request."""
+    return bool(thread_id) and thread_id in _PINNED
+
+
+def restore_language(thread_id: str, code: str | None, pinned: bool = False) -> str:
+    """Re-apply a persisted session language when resuming a saved session.
+
+    Sets the ContextVar for this handler's context and, if the language had been pinned by
+    an explicit request, restores that pin too. Falls back to the configured default.
+    """
+    normalized = (code or "").strip().lower() or DEFAULT_RESPONSE_LANGUAGE
+    if pinned and thread_id:
+        _PINNED[thread_id] = normalized
+    _SESSION_LANGUAGE.set(normalized)
+    return normalized
+
+
 def language_name(code: str) -> str:
     """Human-readable English name of a language code; falls back to the raw code."""
     key = (code or "").strip().lower()

@@ -31,4 +31,5 @@ dist/
 # Project-specific
 workspace/
 runs/
+sessions/
 benchmark/results/

@@ -6,3 +6,5 @@ langgraph==1.2.9
 python-dotenv==1.0.1
 langdetect==1.0.9
 PyYAML==6.0.2
+langgraph-checkpoint-sqlite==3.1.0
+aiosqlite==0.22.1

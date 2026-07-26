@@ -58,7 +58,7 @@ Most multi-agent demos fail in the same predictable ways:
                     ▼
         ┌───────────────────────────┐
         │   LangGraph (PM graph)    │
-        │   + MemorySaver           │◄──── interrupt() / Command(resume=…)
+        │   + AsyncSqliteSaver      │◄──── interrupt() / Command(resume=…)
         │                           │      human-in-the-loop Q&A
         │   tools:                  │
         │    assign_task            │
@@ -209,11 +209,25 @@ Usage metadata is read from `usage_metadata` with a fallback to `response_metada
 a provider that reports neither contributes zero tokens rather than failing the run.
 `benchmark/` (below) turns those records into a comparison between routing strategies.
 
-### 5. Human-in-the-loop uses real checkpointing
+### 5. Human-in-the-loop uses real checkpointing — and sessions are durable
 
-`ask_user` calls LangGraph's `interrupt()`, backed by a `MemorySaver` checkpointer. The
-graph genuinely suspends mid-execution and resumes with `Command(resume=answer)` when the
-next WebSocket message arrives. It is not a blocking `input()` call in disguise.
+`ask_user` calls LangGraph's `interrupt()`, backed by a checkpointer. The graph genuinely
+suspends mid-execution and resumes with `Command(resume=answer)` when the next message
+arrives. It is not a blocking `input()` call in disguise.
+
+That checkpointer is a persistent **AsyncSqliteSaver**, so a session outlives the browser
+tab and the server process. Each session has one stable `thread_id` (kept in the browser's
+`localStorage`) that ties together three durable layers under `sessions/<thread_id>/`:
+
+- the **PM graph checkpoint** — the Project Manager's own conversation;
+- **`specialists.json`** — each specialist's message history, so the team remembers what it
+  already built and decided;
+- **`events.jsonl`** — every message and activity the browser was shown.
+
+On reconnect the server replays `events.jsonl` verbatim, restores the specialist histories,
+and continues from the checkpoint — so a user can close the app and pick up later without
+losing any chat from the PM or the team. A session switcher in the header (`＋ New project`
+and the dropdown, backed by `GET /api/sessions`) lists every saved project.
 
 ### 6. Full observability of nested agents
 
@@ -345,6 +359,8 @@ environment variables:
 | `RUNS_DIR` | Where per-request metrics records are written | `./runs` |
 | `MAX_HISTORY_MESSAGES` | Messages kept in a specialist's history before trimming | `60` |
 | `DEFAULT_RESPONSE_LANGUAGE` | Response language before detection (ISO 639-1) | `id` |
+| `SESSIONS_DIR` | Where durable session state (checkpoint, history, event log) lives | `./sessions` |
+| `CHECKPOINT_DB` | SQLite file backing the PM graph checkpointer | `./sessions/checkpoints.sqlite` |
 | `ALLOW_UNSANDBOXED_COMMANDS` | Run agent commands directly on the host instead of in a container | unset (sandboxed) |
 | `RUNNER_IMAGE` | Image used to execute agent commands | `appbuilder-runner:latest` |
 | `RUNNER_NETWORK` | Docker network for the runner (`bridge` to allow installs) | `none` |
@@ -376,6 +392,7 @@ appbuilder/
 │   ├── protocol.py     # OK/FAILED + DONE/PARTIAL/BLOCKED tokens (single source of truth)
 │   ├── language.py     # response-language detection, stickiness, prompt directive
 │   ├── metrics.py      # per-agent tokens, cost, latency; JSONL run records
+│   ├── session_store.py# durable sessions: event log, meta, specialist history
 │   ├── server.py       # FastAPI + WebSocket streaming
 │   └── static/
 │       └── index.html  # single-file UI: per-agent tabs, file tree, metrics bar
@@ -386,6 +403,7 @@ appbuilder/
 ├── tests/              # guardrail tests — no API key required
 ├── workspace/          # sandbox — generated apps live here (gitignored)
 ├── runs/               # per-request metrics records (gitignored)
+├── sessions/           # durable per-session state for resume (gitignored)
 ├── requirements.txt
 └── .env.example
 ```
@@ -413,9 +431,14 @@ local use only.
 outbound access — `npm install` fails until you set `RUNNER_NETWORK=bridge`. That is the
 intended tradeoff, not an oversight.
 
-**In-process state.** Conversation checkpoints (`MemorySaver`), specialist histories,
-delegation budgets, and live metrics all live in process memory. Restarting the server
-loses every session; only the JSONL records under `runs/` survive.
+**Sessions are durable, with one edge case.** The PM checkpoint, specialist histories,
+and the chat event log are persisted per session, so closing the app and reopening resumes
+the same project with its full history. The one soft spot is reconnecting at the *exact*
+moment the PM is waiting on an `ask_user` question: `AsyncSqliteSaver` commits the paused
+checkpoint on a background thread, and a disconnect can race that commit. The pending
+question itself is stored durably (in `meta.json`) so it is always re-shown, but resuming
+it may cost one extra answer round. Delegation budgets and the live metrics *timer* remain
+in-process and reset on restart (cumulative token/cost totals are persisted).
 
 **History trimming is a window, not a summary.** Old messages past
 `MAX_HISTORY_MESSAGES` are dropped, not compressed, so a very long session forgets its
@@ -441,7 +464,7 @@ above the threshold) will switch the session until the next confident message.
 - [x] Benchmark harness: N identical tasks, measured variance and cost
 - [x] Containerized command execution
 - [x] Response language mirrors the user's
-- [ ] Persistent checkpointer (SQLite/Postgres) so sessions survive a restart
+- [x] Persistent checkpointer (SQLite) + resumable sessions with full chat replay
 - [ ] History summarization instead of a plain window
 - [ ] Rootless/gVisor runner so the server no longer needs the Docker socket
 

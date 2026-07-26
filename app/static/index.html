@@ -22,6 +22,16 @@
     display: flex; align-items: center; gap: 12px; background: var(--panel);
   }
   header h1 { font-size: 15px; font-weight: 600; }
+  #session-picker {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px; font-size: 12px; max-width: 280px; outline: none;
+    cursor: pointer;
+  }
+  #new-session {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  #new-session:hover { border-color: var(--accent); color: var(--accent); }
   #status {
     font-size: 12px; color: var(--muted); margin-left: auto;
     display: flex; align-items: center; gap: 6px;
@@ -117,6 +127,8 @@
 <body>
   <header>
     <h1 id="app-title">🤖 App Builder</h1>
+    <select id="session-picker" title=""></select>
+    <button id="new-session" title=""></button>
     <span id="status"></span>
   </header>
   <main>
@@ -168,6 +180,11 @@
       labelQuestion: "PM bertanya — jawab di bawah",
       retry: "mencoba ulang…",
       errorPrefix: "Terjadi masalah saat eksekusi: ",
+      newSession: "＋ Proyek baru",
+      newSessionTitle: "Mulai sesi baru (sesi ini tetap tersimpan)",
+      sessionPickerTitle: "Buka kembali proyek yang tersimpan",
+      untitled: "(tanpa judul)",
+      restored: "Sesi dipulihkan — lanjutkan dari sini.",
       mTokens: "token:", mCost: "estimasi biaya:", mTime: "waktu:", mCalls: "panggilan LLM:",
       actions: {
         write_file: (t) => `menulis file: ${t}`,
@@ -200,6 +217,11 @@
       labelQuestion: "The PM is asking — answer below",
       retry: "retrying…",
       errorPrefix: "Something went wrong during execution: ",
+      newSession: "＋ New project",
+      newSessionTitle: "Start a new session (this one stays saved)",
+      sessionPickerTitle: "Reopen a saved project",
+      untitled: "(untitled)",
+      restored: "Session restored — pick up where you left off.",
       mTokens: "tokens:", mCost: "est. cost:", mTime: "elapsed:", mCalls: "LLM calls:",
       actions: {
         write_file: (t) => `writing file: ${t}`,
@@ -222,12 +244,21 @@
   const sendEl = document.getElementById("send");
   const statusEl = document.getElementById("status");
   const treeEl = document.getElementById("file-tree");
+  const pickerEl = document.getElementById("session-picker");
+  const newSessionEl = document.getElementById("new-session");
+
+  const TID_KEY = "appbuilder.thread_id";
 
   let ws = null;
   let busy = false;
   let agentsInfo = {};   // key -> {name, emoji}
   let activeTab = "pm";
   let sessionThreadId = null;   // set from the "session" event; scopes the file tree
+  // The thread we ask the server to resume. Persisted so closing the app and reopening
+  // continues the same session; null means "start a new one".
+  let currentThreadId = localStorage.getItem(TID_KEY) || null;
+  let replaying = false;        // true while the server is replaying a saved conversation
+  let reconnectTimer = null;
 
   function setStatus(cls, text) { statusEl.className = cls; statusEl.textContent = text; }
 
@@ -244,6 +275,9 @@
     document.getElementById("m-cost-label").textContent = lang.mCost;
     document.getElementById("m-time-label").textContent = lang.mTime;
     document.getElementById("m-calls-label").textContent = lang.mCalls;
+    newSessionEl.textContent = lang.newSession;
+    newSessionEl.title = lang.newSessionTitle;
+    pickerEl.title = lang.sessionPickerTitle;
     if (statusEl.className === "online" || !statusEl.textContent) {
       setStatus(statusEl.className, lang.ready);
     }
@@ -263,6 +297,7 @@
   }
 
   function startElapsed() {
+    if (replaying) return;
     runStartedAt = performance.now();
     clearInterval(elapsedTimer);
     elapsedTimer = setInterval(renderElapsed, 200);
@@ -275,14 +310,26 @@
     renderElapsed();
   }
 
+  // metricsBase carries the session's cumulative totals restored from earlier runs (across
+  // restarts); liveTotals is this connection's running total. The footer shows the sum, so
+  // continuing a saved session keeps counting from where it left off.
+  let metricsBase = {};
+  let liveTotals = {};
+
+  function setMetricsBase(base) {
+    metricsBase = base || {};
+    renderMetrics(liveTotals);
+  }
+
   function renderMetrics(totals) {
-    if (!totals) return;
-    document.getElementById("m-tokens").textContent =
-      (totals.total_tokens || 0).toLocaleString();
-    document.getElementById("m-cost").textContent =
-      "$" + (totals.cost_usd || 0).toFixed(4);
-    document.getElementById("m-calls").textContent =
-      (totals.llm_calls || 0) + (totals.retries ? ` (${totals.retries}↻)` : "");
+    if (totals) liveTotals = totals;
+    const tokens = (metricsBase.total_tokens || 0) + (liveTotals.total_tokens || 0);
+    const cost = (metricsBase.cost_usd || 0) + (liveTotals.cost_usd || 0);
+    const calls = (metricsBase.llm_calls || 0) + (liveTotals.llm_calls || 0);
+    const retries = (metricsBase.retries || 0) + (liveTotals.retries || 0);
+    document.getElementById("m-tokens").textContent = tokens.toLocaleString();
+    document.getElementById("m-cost").textContent = "$" + cost.toFixed(4);
+    document.getElementById("m-calls").textContent = calls + (retries ? ` (${retries}↻)` : "");
   }
 
   /** Render a structured tool-call payload from the server in the session language. */
@@ -332,6 +379,7 @@
   }
 
   function notify(agentKey) {
+    if (replaying) return;   // replayed history should not raise unread badges
     if (agentKey === activeTab) return;
     const tab = document.getElementById("tab-" + agentKey);
     if (!tab) return;
@@ -341,6 +389,7 @@
   }
 
   function markBusy(agentKey) {
+    if (replaying) return;   // don't animate tabs while reconstructing past activity
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("busy"));
     if (agentKey) {
       const tab = document.getElementById("tab-" + agentKey);
@@ -380,6 +429,7 @@
   }
 
   async function refreshFiles() {
+    if (replaying) return;   // one refresh happens at replay_end instead
     try {
       const url = sessionThreadId
         ? "/api/files?thread_id=" + encodeURIComponent(sessionThreadId)
@@ -398,12 +448,59 @@
     } catch (e) { /* abaikan */ }
   }
 
+  function clearPanes() {
+    document.querySelectorAll(".pane").forEach(p => { p.innerHTML = ""; });
+    document.querySelectorAll(".tab").forEach(t => {
+      t.classList.remove("unread", "busy");
+      const badge = t.querySelector(".badge");
+      if (badge) badge.textContent = "0";
+    });
+    liveTotals = {};
+  }
+
+  async function loadSessions() {
+    try {
+      const res = await fetch("/api/sessions");
+      const items = await res.json();
+      pickerEl.innerHTML = "";
+      for (const s of items) {
+        const opt = document.createElement("option");
+        opt.value = s.thread_id;
+        opt.textContent = s.title || lang.untitled;
+        if (s.thread_id === currentThreadId) opt.selected = true;
+        pickerEl.appendChild(opt);
+      }
+      pickerEl.style.display = items.length ? "" : "none";
+    } catch (e) { /* ignore */ }
+  }
+
   function handleEvent(msg) {
     const agent = msg.agent || "pm";
     switch (msg.type) {
       case "session":
         sessionThreadId = msg.thread_id;
+        currentThreadId = msg.thread_id;
+        localStorage.setItem(TID_KEY, msg.thread_id);
+        clearPanes();
+        setMetricsBase(msg.metrics || {});
+        loadSessions();
         refreshFiles();
+        break;
+      case "replay_start":
+        replaying = true;
+        break;
+      case "replay_end":
+        replaying = false;
+        setStatus("online", lang.restored);
+        refreshFiles();
+        break;
+      case "user":
+        addMsg("pm", "user", msg.content);
+        break;
+      case "awaiting":
+        setStatus("question", lang.waitingAnswer);
+        setBusy(false);
+        switchTab("pm");
         break;
       case "language":
         applyLanguage(msg.code);
@@ -472,20 +569,39 @@
         setBusy(false);
         stopElapsed();
         refreshFiles();
+        loadSessions();   // the session title may have just been set from the first message
         break;
     }
   }
 
   function connect() {
+    clearTimeout(reconnectTimer);
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(proto + "//" + location.host + "/ws");
+    // Ask the server to resume our saved session; it mints a new one if this is our first.
+    const query = currentThreadId ? "?thread_id=" + encodeURIComponent(currentThreadId) : "";
+    ws = new WebSocket(proto + "//" + location.host + "/ws" + query);
     ws.onopen = () => { setStatus("online", lang.ready); setBusy(false); };
     ws.onclose = () => {
+      replaying = false;
       setStatus("", lang.disconnected);
       setBusy(true);
-      setTimeout(connect, 2000);
+      reconnectTimer = setTimeout(connect, 2000);
     };
     ws.onmessage = (ev) => handleEvent(JSON.parse(ev.data));
+  }
+
+  /** Switch to another saved session, or start a fresh one when threadId is null. */
+  function switchSession(threadId) {
+    if (threadId) localStorage.setItem(TID_KEY, threadId);
+    else localStorage.removeItem(TID_KEY);
+    currentThreadId = threadId;
+    replaying = false;
+    clearPanes();
+    setMetricsBase({});
+    stopElapsed();
+    switchTab("pm");
+    if (ws) { ws.onclose = null; try { ws.close(); } catch (e) { /* ignore */ } }
+    connect();
   }
 
   function send() {
@@ -507,14 +623,18 @@
     inputEl.style.height = "auto";
     inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px";
   });
+  newSessionEl.addEventListener("click", () => switchSession(null));
+  pickerEl.addEventListener("change", () => {
+    if (pickerEl.value && pickerEl.value !== currentThreadId) switchSession(pickerEl.value);
+  });
 
   (async () => {
     applyLanguage("id");
     setStatus("", lang.connecting);
     const res = await fetch("/api/agents");
     buildTabs(await res.json());
+    await loadSessions();
     connect();
-    refreshFiles();
   })();
 </script>
 </body>

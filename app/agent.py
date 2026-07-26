@@ -21,7 +21,13 @@ import time
 import uuid
 from typing import Annotated
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -330,11 +336,31 @@ def reset_task_budget(thread_id: str) -> None:
 
 
 def cleanup_session(thread_id: str) -> None:
-    """Release all in-process state held for a finished session."""
+    """Release all in-process state held for a finished session.
+
+    Only in-memory state is dropped. Durable session data (the checkpoint, the specialist
+    history on disk, the event log) is untouched, so the session can be resumed later.
+    """
     _SPECIALIST_HISTORY.pop(thread_id, None)
     _ASSIGN_BUDGET.pop(thread_id, None)
     forget_session(thread_id)
     METRICS.drop(thread_id)
+
+
+def export_specialist_history(thread_id: str) -> dict[str, list[dict]]:
+    """Serialize a session's specialist histories to JSON-safe dicts for persistence."""
+    bucket = _SPECIALIST_HISTORY.get(thread_id) or {}
+    return {agent_key: messages_to_dict(messages) for agent_key, messages in bucket.items()}
+
+
+def import_specialist_history(thread_id: str, data: dict[str, list[dict]] | None) -> None:
+    """Rehydrate specialist histories from persisted dicts, so the team keeps its context."""
+    if not data:
+        return
+    bucket = _SPECIALIST_HISTORY.setdefault(thread_id, {})
+    for agent_key, dumped in data.items():
+        if agent_key in SPECIALISTS and dumped:
+            bucket[agent_key] = messages_from_dict(dumped)
 
 
 # Zona kepemilikan file per agent, dicek DI LEVEL TOOL (bukan sekadar prompt).
@@ -747,12 +773,17 @@ def route_tools(state: State):
     return END
 
 
-def build_graph():
+def build_graph(checkpointer=None):
+    """Compile the PM graph.
+
+    A checkpointer is required so ask_user's interrupt() can pause and resume. Pass a
+    durable one (e.g. AsyncSqliteSaver) to make sessions survive a server restart; the
+    default in-memory MemorySaver is enough for tests and one-off runs.
+    """
     workflow = StateGraph(State)
     workflow.add_node("pm", project_manager)
     workflow.add_node("tools", ToolNode(PM_TOOLS))
     workflow.add_edge(START, "pm")
     workflow.add_conditional_edges("pm", route_tools, {"tools": "tools", END: END})
     workflow.add_edge("tools", "pm")
-    # MemorySaver wajib ada agar interrupt (ask_user) bisa pause & resume
-    return workflow.compile(checkpointer=MemorySaver())
+    return workflow.compile(checkpointer=checkpointer or MemorySaver())
